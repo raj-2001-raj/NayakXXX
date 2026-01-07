@@ -28,10 +28,11 @@ This project covers the following functionalities:
 
 ---
 
-## 🔗 Collaborative Workspace
+## 🔗 Collaborative Workspaces
 
+> **[RASD - Overleaf Project](https://www.overleaf.com/read/qwvpwnnkdfzm#2b93e1)** > *Requirement Analysis and Specification Document*
 
-> **[Overleaf Project Link](https://www.overleaf.com/read/qwvpwnnkdfzm#2b93e1)**
+> **[DD - Overleaf Project](https://www.overleaf.com/read/dkxphcpcgrtx#a1b9dc)** > *Design Document*
 
 ---
 
@@ -50,6 +51,7 @@ This repository is organized according to the submission guidelines:
 │   └── ...
 │
 ├── DeliveryFolder/       # Final PDF releases submitted for grading
-│   └── RASDv1.pdf        # Current Version
+│   ├── RASDv1.pdf        # Requirement Analysis Document
+│   └── DDv1.pdf          # Design Document (Submitted 2026-01-07)
 │
 └── README.md             # This file
