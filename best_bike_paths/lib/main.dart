@@ -25,7 +25,7 @@ class BBPApp extends StatelessWidget {
       title: 'Best Bike Paths',
       theme: ThemeData(
         useMaterial3: true,
-        // Defined in DD Section 3.7
+        
         primaryColor: const Color(0xFF00FF00),
         scaffoldBackgroundColor: const Color(0xFF121212),
       ),

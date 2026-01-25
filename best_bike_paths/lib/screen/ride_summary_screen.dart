@@ -9,6 +9,7 @@ class RideSummaryScreen extends StatefulWidget {
   final LatLng startPoint;
   final LatLng endPoint;
   final Duration rideDuration;
+  final String? rideId;
 
   const RideSummaryScreen({
     super.key,
@@ -17,6 +18,7 @@ class RideSummaryScreen extends StatefulWidget {
     required this.startPoint,
     required this.endPoint,
     required this.rideDuration,
+    this.rideId,
   });
 
   @override
@@ -61,11 +63,18 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
 
     try {
       for (final report in toSave) {
+        final userId = Supabase.instance.client.auth.currentUser?.id;
+        final type = _mapCategoryToType(report.category);
+        final severity = _mapSeverity(report.category);
+        final locationWkt =
+            'SRID=4326;POINT(${report.location.longitude} ${report.location.latitude})';
         await Supabase.instance.client.from('anomalies').insert({
-          'lat': report.location.latitude,
-          'lng': report.location.longitude,
-          'ride_active': true,
-          'type': report.isManual ? 'manual' : 'auto',
+          'user_id': userId,
+          'ride_id': widget.rideId,
+          'type': type,
+          'severity': severity,
+          'location': locationWkt,
+          'verified': report.isVerified,
           'category': report.category,
         });
       }
@@ -78,9 +87,9 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to publish: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Failed to publish: $e')));
       }
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -104,9 +113,21 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               children: [
-                _buildStat('${_distanceKm.toStringAsFixed(2)} km', 'Distance', const Color(0xFF00FF00)),
-                _buildStat(_formatDuration(widget.rideDuration), 'Time', const Color(0xFF00FF00)),
-                _buildStat('${_avgSpeedKmh.toStringAsFixed(1)} km/h', 'Avg Speed', const Color(0xFF00FF00)),
+                _buildStat(
+                  '${_distanceKm.toStringAsFixed(2)} km',
+                  'Distance',
+                  const Color(0xFF00FF00),
+                ),
+                _buildStat(
+                  _formatDuration(widget.rideDuration),
+                  'Time',
+                  const Color(0xFF00FF00),
+                ),
+                _buildStat(
+                  '${_avgSpeedKmh.toStringAsFixed(1)} km/h',
+                  'Avg Speed',
+                  const Color(0xFF00FF00),
+                ),
               ],
             ),
           ),
@@ -141,7 +162,9 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
                   backgroundColor: Colors.white,
                   foregroundColor: Colors.black,
                   padding: const EdgeInsets.symmetric(vertical: 16),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
                 ),
                 child: Text(
                   _saving ? 'SAVING...' : 'SAVE & PUBLISH',
@@ -308,5 +331,21 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
         Text(label, style: const TextStyle(color: Colors.grey)),
       ],
     );
+  }
+
+  String _mapCategoryToType(String category) {
+    final normalized = category.trim().toLowerCase();
+    if (normalized.contains('pothole')) return 'pothole';
+    if (normalized.contains('bump')) return 'bump';
+    if (normalized.contains('glass')) return 'glass';
+    return 'other';
+  }
+
+  double _mapSeverity(String category) {
+    final normalized = category.trim().toLowerCase();
+    if (normalized.contains('pothole')) return 8.0;
+    if (normalized.contains('bump')) return 5.0;
+    if (normalized.contains('glass')) return 4.0;
+    return 3.0;
   }
 }
