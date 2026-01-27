@@ -51,11 +51,13 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
     }
 
     try {
-      final rows = await client
-          .from('anomalies')
-          .select('id,category,type,severity,verified,created_at')
-          .eq('ride_id', widget.rideId)
-          .order('created_at', ascending: true) as List<dynamic>;
+      final rows =
+          await client
+                  .from('anomalies')
+                  .select('id,category,type,severity,verified,created_at')
+                  .eq('ride_id', widget.rideId)
+                  .order('created_at', ascending: true)
+              as List<dynamic>;
       anomalies = rows.map((row) => AnomalyEntry.fromJson(row)).toList();
     } catch (_) {}
 
@@ -96,10 +98,7 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
               _RideHeader(ride: ride),
               const SizedBox(height: 16),
               if (ride.startPoint != null)
-                _RideMapCard(
-                  start: ride.startPoint!,
-                  end: ride.endPoint,
-                ),
+                _RideMapCard(start: ride.startPoint!, end: ride.endPoint),
               if (ride.startPoint != null) const SizedBox(height: 16),
               _InfoCard(
                 title: 'Summary',
@@ -148,8 +147,8 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
                         ),
                       ]
                     : data.anomalies
-                        .map((a) => _AnomalyTile(anomaly: a))
-                        .toList(),
+                          .map((a) => _AnomalyTile(anomaly: a))
+                          .toList(),
               ),
             ],
           );
@@ -294,11 +293,11 @@ class _RideHeader extends StatelessWidget {
     final dateLabel = ride.startTime != null
         ? _formatDateTime(ride.startTime!)
         : 'Unknown start';
-  final statusLabel = ride.endTime == null && !ride.isStaleWithoutEnd
-    ? 'In progress'
-    : ride.isEndedEarly || ride.isStaleWithoutEnd
-      ? 'Early terminated'
-      : 'Finished';
+    final statusLabel = ride.endTime == null && !ride.isStaleWithoutEnd
+        ? 'In progress'
+        : ride.isEndedEarly || ride.isStaleWithoutEnd
+        ? 'Early terminated'
+        : 'Finished';
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -389,7 +388,8 @@ class _RideMapCard extends StatelessWidget {
     final hasEnd = end != null;
     final points = [start, if (hasEnd) end!];
     final bounds = LatLngBounds.fromPoints(points);
-    final hasDistinctPoints = hasEnd &&
+    final hasDistinctPoints =
+        hasEnd &&
         (start.latitude != end!.latitude || start.longitude != end!.longitude);
 
     return Container(
@@ -443,8 +443,11 @@ class _RideMapCard extends StatelessWidget {
                     point: end!,
                     width: 30,
                     height: 30,
-                    child:
-                        const Icon(Icons.location_on, color: Colors.red, size: 28),
+                    child: const Icon(
+                      Icons.location_on,
+                      color: Colors.red,
+                      size: 28,
+                    ),
                   ),
               ],
             ),
@@ -522,7 +525,9 @@ class _AnomalyTile extends StatelessWidget {
               Text(
                 anomaly.verified ? 'Verified' : 'Unverified',
                 style: TextStyle(
-                  color: anomaly.verified ? const Color(0xFF00FF00) : Colors.grey,
+                  color: anomaly.verified
+                      ? const Color(0xFF00FF00)
+                      : Colors.grey,
                   fontSize: 12,
                 ),
               ),

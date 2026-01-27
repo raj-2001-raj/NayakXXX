@@ -8,8 +8,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/sensor_service.dart';
 import '../services/navigation_service.dart';
+import '../services/weather_service.dart';
+import '../services/segment_coloring_service.dart';
 import 'manual_report_dialog.dart';
 import 'ride_summary_screen.dart';
+import 'verification_dialog.dart';
 import 'app_bottom_nav.dart';
 import 'dashboard_screen.dart';
 import 'history_screen.dart';
@@ -76,16 +79,20 @@ class SurfaceData {
 }
 
 class RecordingScreen extends StatefulWidget {
-  const RecordingScreen({super.key});
+  final String? resumeRideId;
+  final bool guestMode;
+
+  const RecordingScreen({super.key, this.resumeRideId, this.guestMode = false});
 
   @override
   State<RecordingScreen> createState() => _RecordingScreenState();
 }
 
 class _RecordingScreenState extends State<RecordingScreen>
-  with WidgetsBindingObserver {
+    with WidgetsBindingObserver {
   final SensorService _sensorService = SensorService();
   final NavigationService _navService = NavigationService();
+  final WeatherService _weatherService = WeatherService();
   final MapController _mapController = MapController();
   final TextEditingController _searchController = TextEditingController();
 
@@ -128,22 +135,73 @@ class _RecordingScreenState extends State<RecordingScreen>
   int _tileErrorCount = 0;
   String? _tileErrorMessage;
 
+  // Weather alerts
+  WeatherData? _weatherData;
+  bool _showWeatherAlerts = false;
+
+  // Segment coloring
+  List<RoadSegment> _coloredSegments = [];
+  bool _showColoredSegments = true;
+  List<AnomalyData> _anomalyDataList = [];
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _initializeLocation();
     _loadPreferencesAndData();
-    _restoreRideIfNeeded();
+    _fetchWeather();
+    // If resuming a specific ride from dashboard, handle that
+    if (widget.resumeRideId != null) {
+      _resumeSpecificRide(widget.resumeRideId!);
+    } else {
+      _restoreRideIfNeeded();
+    }
+  }
+
+  /// Resume a specific unfinished ride (called from dashboard)
+  Future<void> _resumeSpecificRide(String rideId) async {
+    try {
+      final ride = await Supabase.instance.client
+          .from('rides')
+          .select('id,start_time,start_lat,start_lon')
+          .eq('id', rideId)
+          .maybeSingle();
+
+      if (ride == null) {
+        debugPrint('[RIDE] Could not find ride $rideId');
+        return;
+      }
+
+      final startLat = (ride['start_lat'] as num?)?.toDouble() ?? 0;
+      final startLon = (ride['start_lon'] as num?)?.toDouble() ?? 0;
+      final startTimeRaw = ride['start_time']?.toString();
+
+      _restoringRide = true;
+      _startLocation = LatLng(startLat, startLon);
+      _activeRideId = rideId;
+      _rideStartTime = startTimeRaw != null
+          ? DateTime.tryParse(startTimeRaw)
+          : null;
+
+      setState(() {
+        _isRideActive = true;
+        _pendingAutoEndDialog = false;
+        _autoEndDismissed = false;
+      });
+      await _persistRideState();
+      await _resumeActiveRide();
+    } catch (e) {
+      debugPrint('[RIDE] Error resuming ride $rideId: $e');
+    }
   }
 
   void _startLocationStream() {
     _positionSub?.cancel();
     final settings = _buildLocationSettings();
-    _positionSub =
-        Geolocator.getPositionStream(locationSettings: settings).listen(
-      _onPositionUpdate,
-    );
+    _positionSub = Geolocator.getPositionStream(
+      locationSettings: settings,
+    ).listen(_onPositionUpdate);
   }
 
   void _onPositionUpdate(Position pos) {
@@ -164,11 +222,7 @@ class _RecordingScreenState extends State<RecordingScreen>
   void _checkDestinationArrival(LatLng location) {
     final destination = _destinationPoint;
     if (destination == null) return;
-    final meters = const Distance().as(
-      LengthUnit.Meter,
-      destination,
-      location,
-    );
+    final meters = const Distance().as(LengthUnit.Meter, destination, location);
     if (_autoEndDismissed && meters > 120) {
       _autoEndDismissed = false;
     }
@@ -290,10 +344,15 @@ class _RecordingScreenState extends State<RecordingScreen>
         ? LatLng(destLat, destLon)
         : null;
     _activeRideId = (rideId?.isNotEmpty ?? false) ? rideId : null;
-    _rideStartTime =
-        startTimeRaw != null && startTimeRaw.isNotEmpty
-            ? DateTime.tryParse(startTimeRaw)
-            : null;
+
+    // Parse the start time - ensure it's in local time
+    if (startTimeRaw != null && startTimeRaw.isNotEmpty) {
+      final parsed = DateTime.tryParse(startTimeRaw);
+      _rideStartTime = parsed?.toLocal();
+    } else {
+      _rideStartTime = null;
+    }
+
     setState(() {
       _isRideActive = true;
       _pendingAutoEndDialog = false;
@@ -540,6 +599,11 @@ class _RecordingScreenState extends State<RecordingScreen>
         _autoSelectedRoute = withIssues.isNotEmpty;
       });
 
+      // Compute colored segments for the selected route
+      if (_routePoints.isNotEmpty) {
+        _computeColoredSegments();
+      }
+
       if (_routeOptions.isNotEmpty) {
         _mapController.fitCamera(
           CameraFit.bounds(
@@ -566,7 +630,9 @@ class _RecordingScreenState extends State<RecordingScreen>
     for (int i = 0; i < options.length; i++) {
       final option = options[i];
       final minutes = option.durationSeconds / 60;
-      final cobblePenalty = _avoidCobblestones ? option.cobblestoneScore * 2 : 0;
+      final cobblePenalty = _avoidCobblestones
+          ? option.cobblestoneScore * 2
+          : 0;
       final score = minutes + (option.severityScore * 2) + cobblePenalty;
       if (score < bestScore) {
         bestScore = score;
@@ -583,7 +649,9 @@ class _RecordingScreenState extends State<RecordingScreen>
 
     final anomalies = await _fetchAnomalyPoints();
     final distance = const Distance();
-    final surfacePoints = _avoidCobblestones ? _surfacePoints : <SurfacePoint>[];
+    final surfacePoints = _avoidCobblestones
+        ? _surfacePoints
+        : <SurfacePoint>[];
 
     return options.map((option) {
       final sampled = _sampleRoutePoints(option.points, maxPoints: 200);
@@ -604,7 +672,11 @@ class _RecordingScreenState extends State<RecordingScreen>
       if (surfacePoints.isNotEmpty) {
         for (final surface in surfacePoints) {
           for (final point in sampled) {
-            final meters = distance.as(LengthUnit.Meter, surface.location, point);
+            final meters = distance.as(
+              LengthUnit.Meter,
+              surface.location,
+              point,
+            );
             if (meters <= 40) {
               cobbleScore += surface.weight;
               break;
@@ -623,19 +695,52 @@ class _RecordingScreenState extends State<RecordingScreen>
     }).toList();
   }
 
+  /// Fetch anomaly points from the database
+  /// TODO: Add RPC function in Supabase to filter by bounding box for better performance
+  /// Currently fetches all anomalies - may be slow with large datasets
   Future<List<AnomalyPoint>> _fetchAnomalyPoints() async {
     try {
-      final rows = await Supabase.instance.client
-          .from('anomalies')
-          .select('location,severity')
-          .limit(500) as List<dynamic>;
+      final rows =
+          await Supabase.instance.client
+                  .from('anomalies')
+                  .select('id,location,severity,category,verified')
+                  .order('created_at', ascending: false)
+                  .limit(1000)
+              as List<dynamic>;
+
+      // Store full data for verification dialog
+      _fetchedAnomaliesRaw = rows.cast<Map<String, dynamic>>();
 
       return rows
           .map((row) => _parseAnomalyPoint(row))
           .whereType<AnomalyPoint>()
           .toList();
-    } catch (_) {
+    } catch (e) {
+      debugPrint('Failed to fetch anomalies: $e');
       return [];
+    }
+  }
+
+  // Store raw anomaly data for verification
+  List<Map<String, dynamic>> _fetchedAnomaliesRaw = [];
+
+  IconData _getAnomalyIcon(String category) {
+    switch (category.toLowerCase()) {
+      case 'pothole':
+        return Icons.warning;
+      case 'bump':
+        return Icons.trending_up;
+      case 'crack':
+        return Icons.grain;
+      case 'debris':
+      case 'broken glass':
+        return Icons.broken_image;
+      case 'construction':
+        return Icons.construction;
+      case 'flooding':
+        return Icons.water;
+      default:
+        return Icons.report_problem;
     }
   }
 
@@ -679,9 +784,9 @@ class _RecordingScreenState extends State<RecordingScreen>
       );
     }
     if (location is String) {
-      final match = RegExp(r'POINT\(([-\d\.]+)\s+([-\d\.]+)\)').firstMatch(
-        location,
-      );
+      final match = RegExp(
+        r'POINT\(([-\d\.]+)\s+([-\d\.]+)\)',
+      ).firstMatch(location);
       if (match != null) {
         final lon = double.tryParse(match.group(1)!);
         final lat = double.tryParse(match.group(2)!);
@@ -693,10 +798,12 @@ class _RecordingScreenState extends State<RecordingScreen>
 
   Future<List<FountainPoint>> _fetchFountains() async {
     try {
-      final rows = await Supabase.instance.client
-          .from('fountains')
-          .select('osm_id,location')
-          .limit(1200) as List<dynamic>;
+      final rows =
+          await Supabase.instance.client
+                  .from('fountains')
+                  .select('osm_id,location')
+                  .limit(1200)
+              as List<dynamic>;
 
       return rows
           .map((row) {
@@ -746,11 +853,13 @@ class _RecordingScreenState extends State<RecordingScreen>
 
     final distance = const Distance();
     FountainPoint nearest = fountains.first;
-    double nearestMeters =
-        distance.as(LengthUnit.Meter, current, fountains.first.location);
+    double nearestMeters = distance.as(
+      LengthUnit.Meter,
+      current,
+      fountains.first.location,
+    );
     for (final fountain in fountains.skip(1)) {
-      final meters =
-          distance.as(LengthUnit.Meter, current, fountain.location);
+      final meters = distance.as(LengthUnit.Meter, current, fountain.location);
       if (meters < nearestMeters) {
         nearestMeters = meters;
         nearest = fountain;
@@ -760,10 +869,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     _destinationPoint = nearest.location;
     _searchController.text = 'Nearest fountain';
 
-    final options = await _navService.getBikeRoutes(
-      current,
-      nearest.location,
-    );
+    final options = await _navService.getBikeRoutes(current, nearest.location);
 
     final withIssues = await _attachIssueCounts(options);
     final bestIndex = _pickBestRouteIndex(withIssues);
@@ -792,9 +898,7 @@ class _RecordingScreenState extends State<RecordingScreen>
         );
         _showRouteOptionsSheet();
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Routing to the nearest fountain.'),
-          ),
+          const SnackBar(content: Text('Routing to the nearest fountain.')),
         );
       }
     }
@@ -802,10 +906,12 @@ class _RecordingScreenState extends State<RecordingScreen>
 
   Future<SurfaceData> _fetchSurfaceSegments() async {
     try {
-      final rows = await Supabase.instance.client
-          .from('surface_segments')
-          .select('surface,centroid,geometry')
-          .limit(1500) as List<dynamic>;
+      final rows =
+          await Supabase.instance.client
+                  .from('surface_segments')
+                  .select('surface,centroid,geometry')
+                  .limit(1500)
+              as List<dynamic>;
 
       final points = <SurfacePoint>[];
       final segments = <List<LatLng>>[];
@@ -815,10 +921,7 @@ class _RecordingScreenState extends State<RecordingScreen>
         final centroid = _parseGeoPoint(row['centroid']);
         if (centroid != null) {
           points.add(
-            SurfacePoint(
-              location: centroid,
-              weight: _surfaceWeight(surface),
-            ),
+            SurfacePoint(location: centroid, weight: _surfaceWeight(surface)),
           );
         }
 
@@ -855,29 +958,32 @@ class _RecordingScreenState extends State<RecordingScreen>
       final coords = geometry['coordinates'];
       if (type == 'LineString' && coords is List) {
         return coords
-            .map((c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()))
+            .map(
+              (c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()),
+            )
             .toList();
       }
       if (type == 'Polygon' && coords is List && coords.isNotEmpty) {
         final ring = coords.first as List;
         return ring
-            .map((c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()))
+            .map(
+              (c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()),
+            )
             .toList();
       }
       if (type == 'MultiLineString' && coords is List && coords.isNotEmpty) {
         final first = coords.first as List;
         return first
-            .map((c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()))
+            .map(
+              (c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()),
+            )
             .toList();
       }
     }
     return [];
   }
 
-  List<LatLng> _sampleRoutePoints(
-    List<LatLng> points, {
-    int maxPoints = 200,
-  }) {
+  List<LatLng> _sampleRoutePoints(List<LatLng> points, {int maxPoints = 200}) {
     if (points.length <= maxPoints) return points;
     final step = (points.length / maxPoints).ceil().clamp(1, points.length);
     final sampled = <LatLng>[];
@@ -1093,10 +1199,10 @@ class _RecordingScreenState extends State<RecordingScreen>
   Future<void> _stopRide() async {
     _sensorService.stopListening();
     _positionSub?.cancel();
-    
+
     // Save ride ID before clearing state
     final rideId = _activeRideId;
-    
+
     setState(() {
       _isRideActive = false;
       _activeRideId = null; // Clear to prevent duplicate operations
@@ -1105,18 +1211,24 @@ class _RecordingScreenState extends State<RecordingScreen>
     setState(() => _testMode = false);
     _sensorService.setTestMode(false);
 
-    final rideDuration = DateTime.now().difference(
-      _rideStartTime ?? DateTime.now(),
-    );
+    // Calculate ride duration - ensure it's positive
+    Duration rideDuration;
+    if (_rideStartTime != null) {
+      rideDuration = DateTime.now().difference(_rideStartTime!);
+      // If negative (clock skew), use absolute value
+      if (rideDuration.isNegative) {
+        rideDuration = rideDuration.abs();
+      }
+    } else {
+      rideDuration = Duration.zero;
+    }
 
     if (rideId != null) {
       try {
         // Only update end_time - the rides table may not have end_lat/end_lon columns
         await Supabase.instance.client
             .from('rides')
-            .update({
-              'end_time': DateTime.now().toIso8601String(),
-            })
+            .update({'end_time': DateTime.now().toIso8601String()})
             .eq('id', rideId);
         debugPrint('[RIDE] Stopped ride: $rideId');
       } catch (e) {
@@ -1144,9 +1256,9 @@ class _RecordingScreenState extends State<RecordingScreen>
     if (index == 1) return;
     final target = _navTarget(index);
     if (target == null) return;
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => target),
-    );
+    Navigator.of(
+      context,
+    ).pushReplacement(MaterialPageRoute(builder: (_) => target));
   }
 
   Widget? _navTarget(int index) {
@@ -1216,6 +1328,175 @@ class _RecordingScreenState extends State<RecordingScreen>
     }
   }
 
+  // ========== WEATHER ALERTS ==========
+
+  Future<void> _fetchWeather() async {
+    final weather = await _weatherService.getWeather(
+      _currentLocation.latitude,
+      _currentLocation.longitude,
+    );
+    if (mounted && weather != null) {
+      setState(() {
+        _weatherData = weather;
+        // Show weather alert banner if there are warnings or dangers
+        _showWeatherAlerts = weather.alerts.any(
+          (a) =>
+              a.severity == AlertSeverity.warning ||
+              a.severity == AlertSeverity.danger,
+        );
+      });
+    }
+  }
+
+  Widget _buildWeatherBanner() {
+    if (_weatherData == null || !_showWeatherAlerts)
+      return const SizedBox.shrink();
+
+    final alerts = _weatherData!.alerts
+        .where(
+          (a) =>
+              a.severity == AlertSeverity.warning ||
+              a.severity == AlertSeverity.danger,
+        )
+        .toList();
+
+    if (alerts.isEmpty) return const SizedBox.shrink();
+
+    final alert = alerts.first;
+    final isDanger = alert.severity == AlertSeverity.danger;
+
+    return Container(
+      margin: const EdgeInsets.all(8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: isDanger
+            ? Colors.red.withOpacity(0.9)
+            : Colors.orange.withOpacity(0.9),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          Text(alert.icon, style: const TextStyle(fontSize: 20)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  alert.title,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                ),
+                Text(
+                  alert.message,
+                  style: const TextStyle(color: Colors.white70, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.close, color: Colors.white, size: 18),
+            onPressed: () => setState(() => _showWeatherAlerts = false),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ========== SEGMENT COLORING ==========
+
+  Future<void> _computeColoredSegments() async {
+    if (_routePoints.isEmpty) return;
+
+    // Fetch anomalies for coloring if not already loaded
+    if (_anomalyDataList.isEmpty) {
+      await _fetchAnomaliesForColoring();
+    }
+
+    final segments = SegmentColoringService.computeColoredSegments(
+      _routePoints,
+      _anomalyDataList,
+    );
+
+    if (mounted) {
+      setState(() {
+        _coloredSegments = segments;
+      });
+    }
+  }
+
+  Future<void> _fetchAnomaliesForColoring() async {
+    try {
+      final result = await Supabase.instance.client
+          .from('anomalies')
+          .select('id, location, severity, category, verified')
+          .limit(1000);
+
+      _anomalyDataList = (result as List)
+          .map((json) => AnomalyData.fromJson(json as Map<String, dynamic>))
+          .toList();
+    } catch (e) {
+      debugPrint('Error fetching anomalies for coloring: $e');
+    }
+  }
+
+  List<Polyline> _buildColoredPolylines() {
+    if (!_showColoredSegments || _coloredSegments.isEmpty) {
+      return [];
+    }
+
+    return _coloredSegments.map((segment) {
+      return Polyline(
+        points: segment.points,
+        strokeWidth: 6.0,
+        color: segment.color.withOpacity(0.8),
+      );
+    }).toList();
+  }
+
+  // ========== ANOMALY VERIFICATION ==========
+
+  void _showVerificationDialog(Map<String, dynamic> anomaly) {
+    if (widget.guestMode) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Sign in to verify hazard reports'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    // Parse location
+    double? lat, lon;
+    if (anomaly['location'] is String) {
+      final locStr = anomaly['location'] as String;
+      final match = RegExp(
+        r'POINT\(([-\d.]+)\s+([-\d.]+)\)',
+      ).firstMatch(locStr);
+      if (match != null) {
+        lon = double.tryParse(match.group(1)!);
+        lat = double.tryParse(match.group(2)!);
+      }
+    }
+
+    showDialog(
+      context: context,
+      builder: (context) => VerificationDialog(
+        anomalyId: anomaly['id']?.toString() ?? '',
+        category: anomaly['category']?.toString() ?? 'Unknown',
+        latitude: lat,
+        longitude: lon,
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _debounce?.cancel();
@@ -1228,326 +1509,517 @@ class _RecordingScreenState extends State<RecordingScreen>
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      resizeToAvoidBottomInset: false,
-      body: Stack(
-        children: [
-          FlutterMap(
-            mapController: _mapController,
-            options: MapOptions(
-              initialCenter: _currentLocation,
-              initialZoom: 15.0,
-            ),
-            children: [
-              TileLayer(
-                urlTemplate:
-                    'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-                subdomains: const ['a', 'b', 'c'],
-                userAgentPackageName: 'com.example.bbp.best_bike_paths',
-                errorTileCallback: (tile, error, stackTrace) {
-                  if (!mounted) return;
-                  setState(() {
-                    _tileErrorCount += 1;
-                    _tileErrorMessage ??=
-                        'Map tiles unavailable. Check emulator internet or DNS.';
-                  });
-                },
+    return PopScope(
+      canPop: !_isRideActive,
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop) return;
+        // Show confirmation dialog when trying to leave during active ride
+        await _showExitConfirmationDialog();
+      },
+      child: Scaffold(
+        resizeToAvoidBottomInset: false,
+        body: Stack(
+          children: [
+            FlutterMap(
+              mapController: _mapController,
+              options: MapOptions(
+                initialCenter: _currentLocation,
+                initialZoom: 15.0,
               ),
-              if (_surfaceSegments.isNotEmpty)
-                PolylineLayer(
-                  polylines: _surfaceSegments
-                      .map(
-                        (segment) => Polyline(
-                          points: segment,
-                          strokeWidth: 2,
-                          color: Colors.orangeAccent.withOpacity(0.6),
-                        ),
-                      )
-                      .toList(),
+              children: [
+                TileLayer(
+                  urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                  userAgentPackageName: 'com.example.bbp.best_bike_paths',
+                  errorTileCallback: (tile, error, stackTrace) {
+                    if (!mounted) return;
+                    setState(() {
+                      _tileErrorCount += 1;
+                      _tileErrorMessage ??=
+                          'Map tiles unavailable. Check emulator internet or DNS.';
+                    });
+                  },
                 ),
-              if (_routeOptions.isNotEmpty)
-                PolylineLayer(
-                  polylines: _routeOptions.asMap().entries.map((entry) {
-                    final index = entry.key;
-                    final option = entry.value;
-                    final selected = index == _selectedRouteIndex;
-                    return Polyline(
-                      points: option.points,
-                      strokeWidth: selected ? 5.0 : 3.0,
-                      color: selected
-                          ? const Color(0xFF00FF00)
-                          : Colors.blueGrey.withOpacity(0.6),
-                    );
-                  }).toList(),
-                ),
-              MarkerLayer(
-                markers: [
-                  Marker(
-                    point: _currentLocation,
-                    width: 40,
-                    height: 40,
-                    child: const Icon(
-                      Icons.navigation,
-                      color: Colors.blue,
-                      size: 40,
-                    ),
+                if (_surfaceSegments.isNotEmpty)
+                  PolylineLayer(
+                    polylines: _surfaceSegments
+                        .map(
+                          (segment) => Polyline(
+                            points: segment,
+                            strokeWidth: 2,
+                            color: Colors.orangeAccent.withOpacity(0.6),
+                          ),
+                        )
+                        .toList(),
                   ),
-                  ..._sessionReports.map(
-                    (r) => Marker(
-                      point: r.location,
-                      width: 30,
-                      height: 30,
-                      child: Icon(
-                        r.isManual ? Icons.report : Icons.warning,
-                        color: r.isManual ? Colors.orange : Colors.red,
-                        size: 25,
-                      ),
-                    ),
+                if (_routeOptions.isNotEmpty)
+                  PolylineLayer(
+                    polylines: _routeOptions.asMap().entries.map((entry) {
+                      final index = entry.key;
+                      final option = entry.value;
+                      final selected = index == _selectedRouteIndex;
+                      return Polyline(
+                        points: option.points,
+                        strokeWidth: selected ? 5.0 : 3.0,
+                        color: selected
+                            ? const Color(0xFF00FF00)
+                            : Colors.blueGrey.withOpacity(0.6),
+                      );
+                    }).toList(),
                   ),
-                  ..._fountains.map(
-                    (f) => Marker(
-                      point: f.location,
-                      width: 24,
-                      height: 24,
+                // Colored segments overlay (safety score visualization)
+                if (_showColoredSegments && _coloredSegments.isNotEmpty)
+                  PolylineLayer(polylines: _buildColoredPolylines()),
+                MarkerLayer(
+                  markers: [
+                    Marker(
+                      point: _currentLocation,
+                      width: 40,
+                      height: 40,
                       child: const Icon(
-                        Icons.water_drop,
-                        color: Colors.lightBlueAccent,
-                        size: 20,
+                        Icons.navigation,
+                        color: Colors.blue,
+                        size: 40,
                       ),
                     ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-
-          if (_debugStats.isNotEmpty)
-            Positioned(
-              top: 12,
-              right: 12,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.6),
-                  borderRadius: BorderRadius.circular(8),
+                    ..._sessionReports.map(
+                      (r) => Marker(
+                        point: r.location,
+                        width: 30,
+                        height: 30,
+                        child: Icon(
+                          r.isManual ? Icons.report : Icons.warning,
+                          color: r.isManual ? Colors.orange : Colors.red,
+                          size: 25,
+                        ),
+                      ),
+                    ),
+                    ..._fountains.map(
+                      (f) => Marker(
+                        point: f.location,
+                        width: 24,
+                        height: 24,
+                        child: const Icon(
+                          Icons.water_drop,
+                          color: Colors.lightBlueAccent,
+                          size: 20,
+                        ),
+                      ),
+                    ),
+                    // Tappable anomaly markers for verification
+                    ..._fetchedAnomaliesRaw.map((anomaly) {
+                      final loc = _parseGeoPoint(anomaly['location']);
+                      if (loc == null)
+                        return const Marker(
+                          point: LatLng(0, 0),
+                          child: SizedBox.shrink(),
+                        );
+                      final category =
+                          anomaly['category']?.toString() ?? 'Unknown';
+                      final verified = anomaly['verified'] == true;
+                      return Marker(
+                        point: loc,
+                        width: 32,
+                        height: 32,
+                        child: GestureDetector(
+                          onTap: () => _showVerificationDialog(anomaly),
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: verified
+                                  ? Colors.green.withOpacity(0.8)
+                                  : Colors.red.withOpacity(0.8),
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.white, width: 2),
+                            ),
+                            child: Icon(
+                              _getAnomalyIcon(category),
+                              color: Colors.white,
+                              size: 16,
+                            ),
+                          ),
+                        ),
+                      );
+                    }),
+                  ],
                 ),
-                child: DefaultTextStyle(
-                  style: const TextStyle(color: Colors.white, fontSize: 11),
+              ],
+            ),
+
+            if (_debugStats.isNotEmpty)
+              Positioned(
+                top: 12,
+                right: 12,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.6),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: DefaultTextStyle(
+                    style: const TextStyle(color: Colors.white, fontSize: 11),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Z g: ${_debugStats['zForceG']?.toStringAsFixed(2) ?? '-'}',
+                        ),
+                        Text(
+                          'Raw Z: ${_debugStats['rawZ']?.toStringAsFixed(2) ?? '-'}',
+                        ),
+                        Text(
+                          'Jerk: ${_debugStats['jerk']?.toStringAsFixed(2) ?? '-'} g/s',
+                        ),
+                        Text(
+                          'Speed: ${_debugStats['speedKmh']?.toStringAsFixed(1) ?? '-'} km/h',
+                        ),
+                        Text(
+                          'Thresh: ${_debugStats['threshold']?.toStringAsFixed(2) ?? '-'}',
+                        ),
+                        Text(
+                          'Conf: ${_debugStats['confidence']?.toStringAsFixed(2) ?? '-'}',
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+
+            if (!_isRideActive)
+              Positioned(
+                top: 50,
+                left: 20,
+                right: 20,
+                child: Column(
+                  children: [
+                    // Weather alert banner
+                    _buildWeatherBanner(),
+                    Card(
+                      child: TextField(
+                        controller: _searchController,
+                        onChanged: _onSearchChanged,
+                        decoration: const InputDecoration(
+                          hintText: 'Search Destination...',
+                          prefixIcon: Icon(Icons.search),
+                          border: InputBorder.none,
+                          contentPadding: EdgeInsets.all(15),
+                        ),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed: _loadingRoutes
+                              ? null
+                              : _routeToNearestFountain,
+                          icon: const Icon(Icons.water_drop),
+                          label: const Text('NEAREST FOUNTAIN'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.lightBlue,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    if (_showResults)
+                      Container(
+                        color: Colors.white,
+                        height: 200,
+                        child: ListView.builder(
+                          itemCount: _searchResults.length,
+                          itemBuilder: (context, index) {
+                            final place = _searchResults[index];
+                            return ListTile(
+                              title: Text(
+                                place['display_name'].split(',')[0],
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              onTap: () => _selectDestination(place),
+                            );
+                          },
+                        ),
+                      ),
+                    if (_loadingRoutes)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 12),
+                        child: CircularProgressIndicator(),
+                      ),
+                    if (_routeError != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 12),
+                        child: Text(
+                          _routeError!,
+                          style: const TextStyle(color: Colors.redAccent),
+                        ),
+                      ),
+                    if (_loadingAmenities)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 12),
+                        child: Text(
+                          'Loading map datasets…',
+                          style: TextStyle(color: Colors.grey, fontSize: 12),
+                        ),
+                      ),
+                    if (_routeOptions.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 12),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                _autoSelectedRoute
+                                    ? 'Auto-selected Route ${_selectedRouteIndex + 1} (tap to change)'
+                                    : 'Route ${_selectedRouteIndex + 1} selected',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: _showRouteOptionsSheet,
+                              child: const Text(
+                                'Choose route',
+                                style: TextStyle(color: Color(0xFF00FF00)),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            if (_tileErrorMessage != null && _tileErrorCount > 3)
+              Positioned(
+                bottom: 100,
+                left: 20,
+                right: 20,
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.7),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      Text('Z g: ${_debugStats['zForceG']?.toStringAsFixed(2) ?? '-'}'),
-                      Text('Raw Z: ${_debugStats['rawZ']?.toStringAsFixed(2) ?? '-'}'),
-                      Text('Jerk: ${_debugStats['jerk']?.toStringAsFixed(2) ?? '-'} g/s'),
-                      Text('Speed: ${_debugStats['speedKmh']?.toStringAsFixed(1) ?? '-'} km/h'),
-                      Text('Thresh: ${_debugStats['threshold']?.toStringAsFixed(2) ?? '-'}'),
-                      Text('Conf: ${_debugStats['confidence']?.toStringAsFixed(2) ?? '-'}'),
+                      Text(
+                        _tileErrorMessage!,
+                        style: const TextStyle(color: Colors.white),
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 8),
+                      TextButton(
+                        onPressed: () {
+                          setState(() {
+                            _tileErrorCount = 0;
+                            _tileErrorMessage = null;
+                          });
+                        },
+                        child: const Text(
+                          'Retry map tiles',
+                          style: TextStyle(color: Color(0xFF00FF00)),
+                        ),
+                      ),
                     ],
                   ),
                 ),
               ),
-            ),
 
-          if (!_isRideActive)
-            Positioned(
-              top: 50,
-              left: 20,
-              right: 20,
-              child: Column(
-                children: [
-                  Card(
-                    child: TextField(
-                      controller: _searchController,
-                      onChanged: _onSearchChanged,
-                      decoration: const InputDecoration(
-                        hintText: 'Search Destination...',
-                        prefixIcon: Icon(Icons.search),
-                        border: InputBorder.none,
-                        contentPadding: EdgeInsets.all(15),
-                      ),
-                    ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: SizedBox(
-                      width: double.infinity,
-                      child: OutlinedButton.icon(
-                        onPressed: _loadingRoutes
-                            ? null
-                            : _routeToNearestFountain,
-                        icon: const Icon(Icons.water_drop),
-                        label: const Text('NEAREST FOUNTAIN'),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: Colors.white,
-                          side: const BorderSide(color: Colors.white70),
-                        ),
-                      ),
-                    ),
-                  ),
-                  if (_showResults)
-                    Container(
-                      color: Colors.white,
-                      height: 200,
-                      child: ListView.builder(
-                        itemCount: _searchResults.length,
-                        itemBuilder: (context, index) {
-                          final place = _searchResults[index];
-                          return ListTile(
-                            title: Text(
-                              place['display_name'].split(',')[0],
-                              style: const TextStyle(
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            onTap: () => _selectDestination(place),
-                          );
-                        },
-                      ),
-                    ),
-                  if (_loadingRoutes)
-                    const Padding(
-                      padding: EdgeInsets.only(top: 12),
-                      child: CircularProgressIndicator(),
-                    ),
-                  if (_routeError != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 12),
-                      child: Text(
-                        _routeError!,
-                        style: const TextStyle(color: Colors.redAccent),
-                      ),
-                    ),
-                  if (_loadingAmenities)
-                    const Padding(
-                      padding: EdgeInsets.only(top: 12),
-                      child: Text(
-                        'Loading map datasets…',
-                        style: TextStyle(color: Colors.grey, fontSize: 12),
-                      ),
-                    ),
-                  if (_routeOptions.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 12),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              _autoSelectedRoute
-                                  ? 'Auto-selected Route ${_selectedRouteIndex + 1} (tap to change)'
-                                  : 'Route ${_selectedRouteIndex + 1} selected',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ),
-                          TextButton(
-                            onPressed: _showRouteOptionsSheet,
-                            child: const Text(
-                              'Choose route',
-                              style: TextStyle(color: Color(0xFF00FF00)),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          if (_tileErrorMessage != null && _tileErrorCount > 3)
-            Positioned(
-              bottom: 100,
-              left: 20,
-              right: 20,
-              child: Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.7),
-                  borderRadius: BorderRadius.circular(12),
-                ),
+            if (_isRideActive && !widget.guestMode)
+              Positioned(
+                top: 50,
+                left: 20,
                 child: Column(
-                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(
-                      _tileErrorMessage!,
-                      style: const TextStyle(color: Colors.white),
-                      textAlign: TextAlign.center,
+                    FloatingActionButton.extended(
+                      heroTag: 'test_mode_toggle',
+                      onPressed: _toggleTestMode,
+                      backgroundColor: _testMode
+                          ? Colors.purple
+                          : Colors.grey.shade700,
+                      label: Text(_testMode ? 'TEST ON' : 'TEST OFF'),
+                      icon: const Icon(Icons.science),
                     ),
-                    const SizedBox(height: 8),
-                    TextButton(
-                      onPressed: () {
-                        setState(() {
-                          _tileErrorCount = 0;
-                          _tileErrorMessage = null;
-                        });
-                      },
-                      child: const Text(
-                        'Retry map tiles',
-                        style: TextStyle(color: Color(0xFF00FF00)),
-                      ),
+                    const SizedBox(height: 12),
+                    FloatingActionButton.extended(
+                      heroTag: 'nearest_fountain',
+                      onPressed: _routeToNearestFountain,
+                      backgroundColor: Colors.lightBlue,
+                      label: const Text('FOUNTAIN'),
+                      icon: const Icon(Icons.water_drop),
+                    ),
+                    const SizedBox(height: 12),
+                    FloatingActionButton.extended(
+                      heroTag: 'report_issue',
+                      onPressed: () => _reportPothole(isManual: true),
+                      backgroundColor: Colors.orange,
+                      label: const Text('REPORT'),
+                      icon: const Icon(Icons.add_alert),
                     ),
                   ],
                 ),
               ),
-            ),
 
-          if (_isRideActive)
-            Positioned(
-              top: 50,
-              left: 20,
-              child: Column(
-                children: [
-                  FloatingActionButton.extended(
-                    heroTag: 'test_mode_toggle',
-                    onPressed: _toggleTestMode,
-                    backgroundColor:
-                        _testMode ? Colors.purple : Colors.grey.shade700,
-                    label: Text(_testMode ? 'TEST ON' : 'TEST OFF'),
-                    icon: const Icon(Icons.science),
+            // START/STOP RIDE button - only for authenticated users
+            if (!widget.guestMode)
+              Positioned(
+                bottom: 30,
+                left: 20,
+                right: 20,
+                child: ElevatedButton.icon(
+                  onPressed: _isRideActive ? _stopRide : _startRide,
+                  icon: Icon(
+                    _isRideActive ? Icons.stop : Icons.directions_bike,
                   ),
-                  const SizedBox(height: 12),
-                  FloatingActionButton.extended(
-                    heroTag: 'nearest_fountain',
-                    onPressed: _routeToNearestFountain,
-                    backgroundColor: Colors.lightBlue,
-                    label: const Text('FOUNTAIN'),
-                    icon: const Icon(Icons.water_drop),
+                  label: Text(_isRideActive ? 'STOP RIDE' : 'START RIDE'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _isRideActive
+                        ? Colors.red
+                        : const Color(0xFF00FF00),
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.all(20),
                   ),
-                  const SizedBox(height: 12),
-                  FloatingActionButton.extended(
-                    heroTag: 'report_issue',
-                    onPressed: () => _reportPothole(isManual: true),
-                    backgroundColor: Colors.orange,
-                    label: const Text('REPORT'),
-                    icon: const Icon(Icons.add_alert),
-                  ),
-                ],
+                ),
               ),
-            ),
 
-          Positioned(
-            bottom: 30,
-            left: 20,
-            right: 20,
-            child: ElevatedButton.icon(
-              onPressed: _isRideActive ? _stopRide : _startRide,
-              icon: Icon(_isRideActive ? Icons.stop : Icons.directions_bike),
-              label: Text(_isRideActive ? 'STOP RIDE' : 'START RIDE'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: _isRideActive
-                    ? Colors.red
-                    : const Color(0xFF00FF00),
-                foregroundColor: Colors.black,
-                padding: const EdgeInsets.all(20),
+            // Color legend for segment coloring
+            if (_showColoredSegments && _coloredSegments.isNotEmpty)
+              Positioned(
+                bottom: widget.guestMode ? 100 : 100,
+                left: 10,
+                child: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.7),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text(
+                        'Road Safety',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      _buildLegendItem(Colors.green, 'Safe'),
+                      _buildLegendItem(Colors.yellow, 'Caution'),
+                      _buildLegendItem(Colors.red, 'Hazardous'),
+                    ],
+                  ),
+                ),
               ),
-            ),
+
+            // Guest mode info banner
+            if (widget.guestMode)
+              Positioned(
+                bottom: 30,
+                left: 20,
+                right: 20,
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF2196F3).withOpacity(0.9),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.info_outline, color: Colors.white),
+                      SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          'Guest Mode: View map and routes. Sign in to record rides and report issues.',
+                          style: TextStyle(color: Colors.white, fontSize: 13),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        ),
+        bottomNavigationBar: AppBottomNav(currentIndex: 1, onTap: _onNavTap),
+      ), // End of Scaffold (child of PopScope)
+    ); // End of PopScope
+  }
+
+  Widget _buildLegendItem(Color color, String label) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 12,
+          height: 12,
+          decoration: BoxDecoration(
+            color: color,
+            borderRadius: BorderRadius.circular(2),
+          ),
+        ),
+        const SizedBox(width: 4),
+        Text(label, style: const TextStyle(color: Colors.white, fontSize: 9)),
+      ],
+    );
+  }
+
+  /// Show confirmation dialog when user tries to leave during active ride
+  Future<void> _showExitConfirmationDialog() async {
+    final result = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('Ride in Progress'),
+        content: const Text(
+          'You have an active ride. What would you like to do?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop('stay'),
+            child: const Text('Continue Riding'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop('end'),
+            style: TextButton.styleFrom(foregroundColor: Colors.orange),
+            child: const Text('End Ride'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop('leave'),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Leave (ride stays in progress)'),
           ),
         ],
       ),
-      bottomNavigationBar: AppBottomNav(
-        currentIndex: 1,
-        onTap: _onNavTap,
-      ),
     );
+
+    if (!mounted) return;
+
+    switch (result) {
+      case 'end':
+        await _stopRide();
+        break;
+      case 'leave':
+        // Just navigate away - ride stays in progress in DB
+        // but we should clear local state so SharedPreferences doesn't restore it
+        // Actually, keep it so user can resume from dashboard
+        Navigator.of(context).pop();
+        break;
+      case 'stay':
+      default:
+        // User chose to continue, do nothing
+        break;
+    }
   }
 }

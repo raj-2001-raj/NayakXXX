@@ -49,19 +49,20 @@ class NavigationService {
           final points = geometry
               .map((coord) => LatLng(coord[1].toDouble(), coord[0].toDouble()))
               .toList();
-          
+
           final distanceMeters = (route['distance'] as num).toDouble();
           var durationSeconds = (route['duration'] as num).toDouble();
-          
+
           // Sanity check: OSRM may return unrealistic times
           // For cycling, average speed is 12-18 km/h (urban with stops: ~12 km/h)
           // If OSRM returns faster than 20 km/h avg, use our own estimate
-          final avgSpeedKmh = (distanceMeters / 1000) / (durationSeconds / 3600);
+          final avgSpeedKmh =
+              (distanceMeters / 1000) / (durationSeconds / 3600);
           if (avgSpeedKmh > 20 || durationSeconds <= 0) {
             // Calculate based on realistic cycling speed of 15 km/h
             durationSeconds = (distanceMeters / 1000) / 15 * 3600;
           }
-          
+
           return BikeRouteOption(
             points: points,
             distanceMeters: distanceMeters,

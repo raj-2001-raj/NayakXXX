@@ -15,9 +15,10 @@ class SensorService {
   static const double _gyroCorrectionGain = 0.08;
   static const double _confidenceThreshold = 0.6;
   static const Duration _sampleInterval = Duration(milliseconds: 20);
-  static const double _minSpeedKmh = 10;
-  static const double _validMinSpeedKmh = 5;
-  static const double _validMaxSpeedKmh = 35;
+  static const double _minSpeedKmh =
+      5; // Lowered from 10 to catch more potholes
+  static const double _validMinSpeedKmh = 3; // Lowered from 5
+  static const double _validMaxSpeedKmh = 40; // Raised from 35
   static const Duration _cooldown = Duration(milliseconds: 500);
 
   StreamSubscription? _subscription;
@@ -97,10 +98,7 @@ class SensorService {
   }
 
   void setTestMode(bool enabled) {
-    _sendToIsolate({
-      'type': 'config',
-      'testMode': enabled,
-    });
+    _sendToIsolate({'type': 'config', 'testMode': enabled});
   }
 
   void _handleForce(
@@ -184,7 +182,7 @@ class SensorService {
     double q1 = 0;
     double q2 = 0;
     double q3 = 0;
-  bool testMode = false;
+    bool testMode = false;
 
     List<double> rotateVector(
       double q0,
@@ -236,12 +234,7 @@ class SensorService {
       q3 /= norm;
     }
 
-    void integrateGyro(
-      double gx,
-      double gy,
-      double gz,
-      double dt,
-    ) {
+    void integrateGyro(double gx, double gy, double gz, double dt) {
       final halfDt = 0.5 * dt;
       final dq0 = (-q1 * gx - q2 * gy - q3 * gz) * halfDt;
       final dq1 = (q0 * gx + q2 * gz - q3 * gy) * halfDt;
@@ -314,11 +307,7 @@ class SensorService {
       final accelDevice = [x, y, z];
       final accelWorld = rotateVector(q0, q1, q2, q3, accelDevice);
       final linearWorld = fallback
-          ? [
-              accelWorld[0],
-              accelWorld[1],
-              accelWorld[2] - _gravity,
-            ]
+          ? [accelWorld[0], accelWorld[1], accelWorld[2] - _gravity]
           : accelWorld;
 
       final rawZ = linearWorld[2] / _gravity;
@@ -375,29 +364,30 @@ class SensorService {
       lastZForceG = zForceG;
       lastSampleTime = now;
 
-      if (lastDetection != null &&
-          now.difference(lastDetection!) < _cooldown) {
+      if (lastDetection != null && now.difference(lastDetection!) < _cooldown) {
         return;
       }
 
-    final adaptiveThreshold = _computeAdaptiveThreshold(zWindow);
-    final threshold = testMode
-      ? min(0.9, _zImpactThresholdG)
-      : (adaptiveThreshold > _zImpactThresholdG
-        ? adaptiveThreshold
-        : _zImpactThresholdG);
+      final adaptiveThreshold = _computeAdaptiveThreshold(zWindow);
+      final threshold = testMode
+          ? min(0.9, _zImpactThresholdG)
+          : (adaptiveThreshold > _zImpactThresholdG
+                ? adaptiveThreshold
+                : _zImpactThresholdG);
 
-    final jerkThreshold =
-      testMode ? _jerkThresholdGPerSec * 0.4 : _jerkThresholdGPerSec;
-    final zScore = ((zForceG - threshold) / threshold).clamp(0.0, 1.0);
-    final jerkScore = (jerkGPerSec / jerkThreshold).clamp(0.0, 1.0);
-    final speedScore = ((speedKmh - _minSpeedKmh) /
-        (_validMaxSpeedKmh - _minSpeedKmh))
-      .clamp(0.0, 1.0);
-    final confidence =
-      (zScore * 0.5) + (jerkScore * 0.3) + (speedScore * 0.2);
-    final confidenceThreshold =
-      testMode ? _confidenceThreshold * 0.4 : _confidenceThreshold;
+      final jerkThreshold = testMode
+          ? _jerkThresholdGPerSec * 0.4
+          : _jerkThresholdGPerSec;
+      final zScore = ((zForceG - threshold) / threshold).clamp(0.0, 1.0);
+      final jerkScore = (jerkGPerSec / jerkThreshold).clamp(0.0, 1.0);
+      final speedScore =
+          ((speedKmh - _minSpeedKmh) / (_validMaxSpeedKmh - _minSpeedKmh))
+              .clamp(0.0, 1.0);
+      final confidence =
+          (zScore * 0.5) + (jerkScore * 0.3) + (speedScore * 0.2);
+      final confidenceThreshold = testMode
+          ? _confidenceThreshold * 0.4
+          : _confidenceThreshold;
 
       if (kDebugMode) {
         debugPrint(

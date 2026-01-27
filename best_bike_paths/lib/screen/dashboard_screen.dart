@@ -6,6 +6,59 @@ import 'history_screen.dart';
 import 'profile_screen.dart';
 import 'app_bottom_nav.dart';
 
+/// Represents an unfinished ride that needs to be resolved
+class UnfinishedRide {
+  final String id;
+  final DateTime startTime;
+  final double? startLat;
+  final double? startLon;
+
+  const UnfinishedRide({
+    required this.id,
+    required this.startTime,
+    this.startLat,
+    this.startLon,
+  });
+
+  factory UnfinishedRide.fromJson(Map<String, dynamic> json) {
+    // Parse the timestamp and convert to local time
+    final rawTime = json['start_time']?.toString() ?? '';
+    DateTime parsedTime = DateTime.tryParse(rawTime) ?? DateTime.now();
+    // Supabase returns UTC timestamps, convert to local
+    if (!parsedTime.isUtc && rawTime.endsWith('Z')) {
+      parsedTime = DateTime.parse(rawTime);
+    }
+    final localTime = parsedTime.toLocal();
+
+    return UnfinishedRide(
+      id: json['id']?.toString() ?? '',
+      startTime: localTime,
+      startLat: (json['start_lat'] as num?)?.toDouble(),
+      startLon: (json['start_lon'] as num?)?.toDouble(),
+    );
+  }
+
+  String get formattedTime {
+    final now = DateTime.now();
+    final diff = now.difference(startTime);
+
+    // Handle edge cases where diff might be negative (clock skew)
+    if (diff.isNegative) {
+      return 'Just now';
+    }
+
+    if (diff.inMinutes < 1) {
+      return 'Just now';
+    } else if (diff.inMinutes < 60) {
+      return '${diff.inMinutes} min ago';
+    } else if (diff.inHours < 24) {
+      return '${diff.inHours} hour${diff.inHours > 1 ? 's' : ''} ago';
+    } else {
+      return '${diff.inDays} day${diff.inDays > 1 ? 's' : ''} ago';
+    }
+  }
+}
+
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
 
@@ -17,12 +70,14 @@ class _DashboardScreenState extends State<DashboardScreen>
     with WidgetsBindingObserver {
   bool _automatedMode = true; // Toggle state [RASD Table 4]
   late Future<DashboardStats> _statsFuture;
+  List<UnfinishedRide> _unfinishedRides = [];
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _statsFuture = _fetchDashboardStats();
+    _checkUnfinishedRides();
   }
 
   @override
@@ -35,6 +90,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _refreshStats();
+      _checkUnfinishedRides();
     }
   }
 
@@ -42,6 +98,254 @@ class _DashboardScreenState extends State<DashboardScreen>
     setState(() {
       _statsFuture = _fetchDashboardStats();
     });
+    _checkUnfinishedRides();
+  }
+
+  /// Check for rides that were started but never completed
+  Future<void> _checkUnfinishedRides() async {
+    final client = Supabase.instance.client;
+    final user = client.auth.currentUser;
+    if (user == null) {
+      setState(() {
+        _unfinishedRides = [];
+      });
+      return;
+    }
+
+    try {
+      // Fetch rides where completed is null/false AND end_time is null
+      final rows =
+          await client
+                  .from('rides')
+                  .select('id,start_time,start_lat,start_lon')
+                  .eq('user_id', user.id)
+                  .isFilter('end_time', null)
+                  .order('start_time', ascending: false)
+              as List<dynamic>;
+
+      if (!mounted) return;
+      setState(() {
+        _unfinishedRides = rows
+            .map((row) => UnfinishedRide.fromJson(row as Map<String, dynamic>))
+            .toList();
+      });
+      debugPrint(
+        'Dashboard: Found ${_unfinishedRides.length} unfinished rides',
+      );
+    } catch (e) {
+      debugPrint('Dashboard: Failed to check unfinished rides: $e');
+      if (mounted) {
+        setState(() {
+          _unfinishedRides = [];
+        });
+      }
+    }
+  }
+
+  /// End a ride directly without going to the recording screen
+  Future<void> _endUnfinishedRide(UnfinishedRide ride) async {
+    try {
+      // Only update end_time since 'completed' column may not exist
+      await Supabase.instance.client
+          .from('rides')
+          .update({'end_time': DateTime.now().toIso8601String()})
+          .eq('id', ride.id);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Ride ended successfully')),
+        );
+        _refreshStats();
+      }
+    } catch (e) {
+      debugPrint('Failed to end ride: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Failed to end ride: $e')));
+      }
+    }
+  }
+
+  /// Resume a ride - navigate to recording screen with ride data
+  void _resumeUnfinishedRide(UnfinishedRide ride) {
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => RecordingScreen(resumeRideId: ride.id)),
+    );
+  }
+
+  /// Show bottom sheet to manage unfinished rides
+  void _showUnfinishedRidesSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      isScrollControlled: true,
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * 0.6,
+      ),
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.warning_amber,
+                      color: Colors.orange,
+                      size: 28,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        'You have ${_unfinishedRides.length} unfinished ride${_unfinishedRides.length > 1 ? 's' : ''}',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'These rides were started but never completed. You can resume or end them.',
+                  style: TextStyle(color: Colors.grey, fontSize: 14),
+                ),
+                const SizedBox(height: 20),
+                ..._unfinishedRides
+                    .take(5)
+                    .map((ride) => _buildUnfinishedRideCard(ride)),
+                if (_unfinishedRides.length > 5)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text(
+                      '+ ${_unfinishedRides.length - 5} more rides',
+                      style: const TextStyle(color: Colors.grey),
+                    ),
+                  ),
+                const SizedBox(height: 16),
+                // End All button
+                if (_unfinishedRides.length > 1)
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: () async {
+                        Navigator.pop(context);
+                        await _endAllUnfinishedRides();
+                      },
+                      icon: const Icon(Icons.done_all, color: Colors.orange),
+                      label: const Text('End All Rides'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.orange,
+                        side: const BorderSide(color: Colors.orange),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildUnfinishedRideCard(UnfinishedRide ride) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF2A2A2A),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: Colors.red.withOpacity(0.2),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: const Icon(
+              Icons.directions_bike,
+              color: Colors.red,
+              size: 20,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Started ${ride.formattedTime}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                Text(
+                  'ID: ${ride.id.substring(0, 8)}...',
+                  style: const TextStyle(color: Colors.grey, fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          // Resume button
+          IconButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _resumeUnfinishedRide(ride);
+            },
+            icon: const Icon(Icons.play_arrow, color: Color(0xFF00FF00)),
+            tooltip: 'Resume',
+          ),
+          // End button
+          IconButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _endUnfinishedRide(ride);
+            },
+            icon: const Icon(Icons.stop, color: Colors.orange),
+            tooltip: 'End now',
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _endAllUnfinishedRides() async {
+    final count = _unfinishedRides.length;
+    try {
+      for (final ride in _unfinishedRides) {
+        await Supabase.instance.client
+            .from('rides')
+            .update({'end_time': DateTime.now().toIso8601String()})
+            .eq('id', ride.id);
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ended $count rides successfully')),
+        );
+        _refreshStats();
+      }
+    } catch (e) {
+      debugPrint('Failed to end all rides: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Failed to end rides: $e')));
+      }
+    }
   }
 
   Future<void> _signOut() async {
@@ -57,9 +361,9 @@ class _DashboardScreenState extends State<DashboardScreen>
     if (index == 0) return;
     final target = _navTarget(index);
     if (target == null) return;
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => target),
-    );
+    Navigator.of(
+      context,
+    ).pushReplacement(MaterialPageRoute(builder: (_) => target));
   }
 
   Widget? _navTarget(int index) {
@@ -78,7 +382,10 @@ class _DashboardScreenState extends State<DashboardScreen>
   @override
   Widget build(BuildContext context) {
     final user = Supabase.instance.client.auth.currentUser;
-    final fallbackName = _firstNameFromMeta(user?.userMetadata, user?.email);
+    final isGuest = user == null;
+    final fallbackName = isGuest
+        ? 'Guest'
+        : _firstNameFromMeta(user.userMetadata, user.email);
 
     return Scaffold(
       backgroundColor: const Color(0xFF121212), // Dark Mode
@@ -89,13 +396,15 @@ class _DashboardScreenState extends State<DashboardScreen>
           future: _statsFuture,
           builder: (context, snapshot) {
             final stats = snapshot.data;
-            final displayName = stats?.displayName ?? fallbackName;
+            final displayName = isGuest
+                ? 'Guest'
+                : (stats?.displayName ?? fallbackName);
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  "Welcome back,",
-                  style: TextStyle(color: Colors.grey, fontSize: 14),
+                Text(
+                  isGuest ? "Welcome," : "Welcome back,",
+                  style: const TextStyle(color: Colors.grey, fontSize: 14),
                 ),
                 Text(
                   displayName,
@@ -106,12 +415,16 @@ class _DashboardScreenState extends State<DashboardScreen>
           },
         ),
         actions: [
+          if (!isGuest)
+            IconButton(
+              icon: const Icon(Icons.refresh, color: Colors.grey),
+              onPressed: _refreshStats,
+            ),
           IconButton(
-            icon: const Icon(Icons.refresh, color: Colors.grey),
-            onPressed: _refreshStats,
-          ),
-          IconButton(
-            icon: const Icon(Icons.logout, color: Colors.grey),
+            icon: Icon(
+              isGuest ? Icons.login : Icons.logout,
+              color: Colors.grey,
+            ),
             onPressed: _signOut,
           ),
         ],
@@ -137,80 +450,110 @@ class _DashboardScreenState extends State<DashboardScreen>
                 ),
                 const Spacer(),
 
-                // Big Start Button [DD 3.4.1]
-                GestureDetector(
-                  onTap: () {
-                    Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => const RecordingScreen(),
-                      ),
-                    );
-                  },
-                  child: Container(
-                    width: 200,
-                    height: 200,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF00FF00),
-                      shape: BoxShape.circle,
-                      boxShadow: [
-                        BoxShadow(
-                          color: const Color(0xFF00FF00).withOpacity(0.4),
-                          blurRadius: 20,
-                          spreadRadius: 5,
-                        ),
-                      ],
-                    ),
-                    child: const Center(
-                      child: Text(
-                        "START\nRIDE",
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
+                // Big Start Button or "In A Ride" Button [DD 3.4.1]
+                _buildMainActionButton(),
 
                 const Spacer(),
 
-                // Automated Sensor Toggle [DD Figure 12]
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF1E1E1E),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            "Automated Sensor Mode",
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
+                // Automated Sensor Toggle [DD Figure 12] - only for authenticated users
+                if (!isGuest)
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1E1E1E),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              "Automated Sensor Mode",
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                              ),
                             ),
-                          ),
-                          SizedBox(height: 4),
-                          Text(
-                            "Passive quality detection",
-                            style: TextStyle(color: Colors.grey, fontSize: 12),
-                          ),
-                        ],
-                      ),
-                      Switch(
-                        value: _automatedMode,
-                        activeColor: const Color(0xFF00FF00),
-                        onChanged: (val) =>
-                            setState(() => _automatedMode = val),
-                      ),
-                    ],
+                            SizedBox(height: 4),
+                            Text(
+                              "Passive quality detection",
+                              style: TextStyle(
+                                color: Colors.grey,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                        Switch(
+                          value: _automatedMode,
+                          activeColor: const Color(0xFF00FF00),
+                          onChanged: (val) =>
+                              setState(() => _automatedMode = val),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
+
+                // Guest mode info card
+                if (isGuest)
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1E1E1E),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: const Color(0xFF2196F3).withOpacity(0.3),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Row(
+                          children: [
+                            Icon(
+                              Icons.info_outline,
+                              color: Color(0xFF2196F3),
+                              size: 20,
+                            ),
+                            SizedBox(width: 8),
+                            Text(
+                              "Guest Mode",
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          "View maps and routes. Sign in to record rides, report issues, and contribute to the community.",
+                          style: TextStyle(color: Colors.grey, fontSize: 12),
+                        ),
+                        const SizedBox(height: 12),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton(
+                            onPressed: () {
+                              Navigator.of(context).pushAndRemoveUntil(
+                                MaterialPageRoute(
+                                  builder: (_) => const AuthScreen(),
+                                ),
+                                (route) => false,
+                              );
+                            },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF00FF00),
+                              foregroundColor: Colors.black,
+                            ),
+                            child: const Text('SIGN IN'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 const SizedBox(height: 20),
               ],
             );
@@ -218,9 +561,114 @@ class _DashboardScreenState extends State<DashboardScreen>
         ),
       ),
       // Bottom Nav [DD Figure 12]
-      bottomNavigationBar: AppBottomNav(
-        currentIndex: 0,
-        onTap: _onNavTap,
+      bottomNavigationBar: AppBottomNav(currentIndex: 0, onTap: _onNavTap),
+    );
+  }
+
+  /// Build the main action button - shows "IN A RIDE" (red) if unfinished rides exist,
+  /// "VIEW MAP" (blue) for guests, otherwise shows "START RIDE" (green)
+  Widget _buildMainActionButton() {
+    final user = Supabase.instance.client.auth.currentUser;
+    final isGuest = user == null;
+    final hasUnfinished = _unfinishedRides.isNotEmpty;
+
+    // Guest mode - only allow viewing map (no recording)
+    if (isGuest) {
+      return GestureDetector(
+        onTap: () {
+          Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => const RecordingScreen(guestMode: true),
+            ),
+          );
+        },
+        child: Container(
+          width: 200,
+          height: 200,
+          decoration: BoxDecoration(
+            color: const Color(0xFF2196F3), // Blue for guest
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFF2196F3).withOpacity(0.4),
+                blurRadius: 20,
+                spreadRadius: 5,
+              ),
+            ],
+          ),
+          child: const Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.map, color: Colors.white, size: 32),
+                Text(
+                  "VIEW\nMAP",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 24,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return GestureDetector(
+      onTap: () {
+        if (hasUnfinished) {
+          _showUnfinishedRidesSheet();
+        } else {
+          Navigator.of(
+            context,
+          ).push(MaterialPageRoute(builder: (_) => const RecordingScreen()));
+        }
+      },
+      child: Container(
+        width: 200,
+        height: 200,
+        decoration: BoxDecoration(
+          color: hasUnfinished ? Colors.red : const Color(0xFF00FF00),
+          shape: BoxShape.circle,
+          boxShadow: [
+            BoxShadow(
+              color: (hasUnfinished ? Colors.red : const Color(0xFF00FF00))
+                  .withOpacity(0.4),
+              blurRadius: 20,
+              spreadRadius: 5,
+            ),
+          ],
+        ),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (hasUnfinished)
+                const Icon(
+                  Icons.warning_amber_rounded,
+                  color: Colors.white,
+                  size: 32,
+                ),
+              Text(
+                hasUnfinished ? "IN A\nRIDE" : "START\nRIDE",
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  color: hasUnfinished ? Colors.white : Colors.black,
+                ),
+              ),
+              if (hasUnfinished && _unfinishedRides.length > 1)
+                Text(
+                  "(${_unfinishedRides.length})",
+                  style: const TextStyle(fontSize: 14, color: Colors.white70),
+                ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -283,21 +731,21 @@ class _DashboardScreenState extends State<DashboardScreen>
     int totalRides = 0;
     int anomalyCount = 0;
     try {
-      final rides = await client
-          .from('rides')
-          .select('id')
-          .eq('user_id', user.id) as List<dynamic>;
+      final rides =
+          await client.from('rides').select('id').eq('user_id', user.id)
+              as List<dynamic>;
       totalRides = rides.length;
-      debugPrint('Dashboard: Fetched ${rides.length} rides for user ${user.id}');
+      debugPrint(
+        'Dashboard: Fetched ${rides.length} rides for user ${user.id}',
+      );
     } catch (e) {
       debugPrint('Dashboard: Failed to fetch rides: $e');
     }
 
     try {
-      final anomalies = await client
-          .from('anomalies')
-          .select('id')
-          .eq('user_id', user.id) as List<dynamic>;
+      final anomalies =
+          await client.from('anomalies').select('id').eq('user_id', user.id)
+              as List<dynamic>;
       anomalyCount = anomalies.length;
       debugPrint('Dashboard: Fetched $anomalyCount anomalies');
     } catch (e) {

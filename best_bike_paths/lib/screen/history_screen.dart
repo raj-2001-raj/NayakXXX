@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'app_bottom_nav.dart';
+import 'auth_screen.dart';
 import 'dashboard_screen.dart';
 import 'profile_screen.dart';
 import 'recording_screen.dart';
@@ -50,27 +51,27 @@ class _HistoryScreenState extends State<HistoryScreen>
     if (user == null) return [];
 
     try {
-      final rows = await client
-          .from('rides')
-          .select(
-            'id,start_time,end_time,start_lat,start_lon,end_lat,end_lon,completed,reached_destination',
-          )
-          .eq('user_id', user.id)
-          .order('start_time', ascending: false) as List<dynamic>;
+      final rows =
+          await client
+                  .from('rides')
+                  .select(
+                    'id,start_time,end_time,start_lat,start_lon,end_lat,end_lon,completed,reached_destination',
+                  )
+                  .eq('user_id', user.id)
+                  .order('start_time', ascending: false)
+              as List<dynamic>;
 
-      return rows
-          .map((row) => RideHistoryEntry.fromJson(row))
-          .toList();
+      return rows.map((row) => RideHistoryEntry.fromJson(row)).toList();
     } catch (_) {
       try {
-    final rows = await client
-            .from('rides')
-            .select('id,start_time,end_time,start_lat,start_lon')
-            .eq('user_id', user.id)
-            .order('start_time', ascending: false) as List<dynamic>;
-        return rows
-            .map((row) => RideHistoryEntry.fromJson(row))
-            .toList();
+        final rows =
+            await client
+                    .from('rides')
+                    .select('id,start_time,end_time,start_lat,start_lon')
+                    .eq('user_id', user.id)
+                    .order('start_time', ascending: false)
+                as List<dynamic>;
+        return rows.map((row) => RideHistoryEntry.fromJson(row)).toList();
       } catch (_) {
         return [];
       }
@@ -81,9 +82,9 @@ class _HistoryScreenState extends State<HistoryScreen>
     if (index == 2) return;
     final target = _navTarget(index);
     if (target == null) return;
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => target),
-    );
+    Navigator.of(
+      context,
+    ).pushReplacement(MaterialPageRoute(builder: (_) => target));
   }
 
   Widget? _navTarget(int index) {
@@ -99,8 +100,60 @@ class _HistoryScreenState extends State<HistoryScreen>
     }
   }
 
+  Widget _buildGuestMessage() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.history, size: 64, color: Colors.grey.shade600),
+            const SizedBox(height: 16),
+            const Text(
+              'Sign in to view your ride history',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.w500,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Record trips and track your cycling progress by creating an account.',
+              style: TextStyle(color: Colors.grey, fontSize: 14),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton.icon(
+              onPressed: () {
+                Navigator.of(context).pushAndRemoveUntil(
+                  MaterialPageRoute(builder: (_) => const AuthScreen()),
+                  (route) => false,
+                );
+              },
+              icon: const Icon(Icons.login),
+              label: const Text('SIGN IN'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF00FF00),
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 32,
+                  vertical: 16,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final user = Supabase.instance.client.auth.currentUser;
+    final isGuest = user == null;
+
     return Scaffold(
       backgroundColor: const Color(0xFF121212),
       appBar: AppBar(
@@ -109,52 +162,52 @@ class _HistoryScreenState extends State<HistoryScreen>
         foregroundColor: Colors.white,
         elevation: 0,
         actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh, color: Colors.grey),
-            onPressed: _refreshRides,
-          ),
+          if (!isGuest)
+            IconButton(
+              icon: const Icon(Icons.refresh, color: Colors.grey),
+              onPressed: _refreshRides,
+            ),
         ],
       ),
-      body: FutureBuilder<List<RideHistoryEntry>>(
-        future: _ridesFuture,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
+      body: isGuest
+          ? _buildGuestMessage()
+          : FutureBuilder<List<RideHistoryEntry>>(
+              future: _ridesFuture,
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
 
-          final rides = snapshot.data ?? [];
-          if (rides.isEmpty) {
-            return const Center(
-              child: Text(
-                'No rides yet. Start a ride to see it here.',
-                style: TextStyle(color: Colors.grey),
-              ),
-            );
-          }
-
-          return ListView.builder(
-            padding: const EdgeInsets.all(16),
-            itemCount: rides.length,
-            itemBuilder: (context, index) {
-              final ride = rides[index];
-              return _RideCard(
-                ride: ride,
-                onTap: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => RideDetailScreen(rideId: ride.id),
+                final rides = snapshot.data ?? [];
+                if (rides.isEmpty) {
+                  return const Center(
+                    child: Text(
+                      'No rides yet. Start a ride to see it here.',
+                      style: TextStyle(color: Colors.grey),
                     ),
                   );
-                },
-              );
-            },
-          );
-        },
-      ),
-      bottomNavigationBar: AppBottomNav(
-        currentIndex: 2,
-        onTap: _onNavTap,
-      ),
+                }
+
+                return ListView.builder(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: rides.length,
+                  itemBuilder: (context, index) {
+                    final ride = rides[index];
+                    return _RideCard(
+                      ride: ride,
+                      onTap: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => RideDetailScreen(rideId: ride.id),
+                          ),
+                        );
+                      },
+                    );
+                  },
+                );
+              },
+            ),
+      bottomNavigationBar: AppBottomNav(currentIndex: 2, onTap: _onNavTap),
     );
   }
 }
@@ -251,7 +304,7 @@ class _RideCard extends StatelessWidget {
     final startLabel = ride.startTime != null
         ? _formatDateTime(ride.startTime!)
         : 'Unknown start';
-    
+
     // Determine status label and color
     final String statusLabel;
     final Color statusColor;
@@ -294,7 +347,10 @@ class _RideCard extends StatelessWidget {
                   ),
                 ),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
                   decoration: BoxDecoration(
                     color: statusColor,
                     borderRadius: BorderRadius.circular(8),
@@ -309,10 +365,7 @@ class _RideCard extends StatelessWidget {
             const SizedBox(height: 12),
             _InfoRow(label: 'Ride ID', value: ride.id),
             if (ride.startPoint != null)
-              _InfoRow(
-                label: 'Start',
-                value: _formatLatLng(ride.startPoint!),
-              ),
+              _InfoRow(label: 'Start', value: _formatLatLng(ride.startPoint!)),
             if (ride.endPoint != null)
               _InfoRow(label: 'End', value: _formatLatLng(ride.endPoint!)),
             if (duration != null)

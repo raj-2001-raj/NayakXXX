@@ -81,10 +81,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
     // Get actual ride count from rides table
     try {
-      final rides = await client
-          .from('rides')
-          .select('id')
-          .eq('user_id', user.id) as List<dynamic>;
+      final rides =
+          await client.from('rides').select('id').eq('user_id', user.id)
+              as List<dynamic>;
       totalRides = rides.length;
       debugPrint('[PROFILE] Fetched ${rides.length} rides from rides table');
     } catch (e) {
@@ -94,10 +93,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
     // Get contribution count (total anomalies reported)
     try {
-      final anomalies = await client
-          .from('anomalies')
-          .select('id')
-          .eq('user_id', user.id) as List<dynamic>;
+      final anomalies =
+          await client.from('anomalies').select('id').eq('user_id', user.id)
+              as List<dynamic>;
       contributionCount = anomalies.length;
       debugPrint('[PROFILE] Fetched $contributionCount anomalies');
     } catch (e) {
@@ -119,9 +117,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
     if (index == 3) return;
     final target = _navTarget(index);
     if (target == null) return;
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => target),
-    );
+    Navigator.of(
+      context,
+    ).pushReplacement(MaterialPageRoute(builder: (_) => target));
   }
 
   Widget? _navTarget(int index) {
@@ -147,8 +145,60 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
+  Widget _buildGuestMessage() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.person_outline, size: 64, color: Colors.grey.shade600),
+            const SizedBox(height: 16),
+            const Text(
+              'Sign in to access your profile',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.w500,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Create an account to track your rides, report hazards, and contribute to the cycling community.',
+              style: TextStyle(color: Colors.grey, fontSize: 14),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton.icon(
+              onPressed: () {
+                Navigator.of(context).pushAndRemoveUntil(
+                  MaterialPageRoute(builder: (_) => const AuthScreen()),
+                  (route) => false,
+                );
+              },
+              icon: const Icon(Icons.login),
+              label: const Text('SIGN IN'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF00FF00),
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 32,
+                  vertical: 16,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final user = Supabase.instance.client.auth.currentUser;
+    final isGuest = user == null;
+
     return Scaffold(
       backgroundColor: const Color(0xFF121212),
       appBar: AppBar(
@@ -157,72 +207,77 @@ class _ProfileScreenState extends State<ProfileScreen> {
         foregroundColor: Colors.white,
         elevation: 0,
       ),
-      body: FutureBuilder<ProfileDetails>(
-        future: _profileFuture,
-        builder: (context, snapshot) {
-          final details = snapshot.data ?? const ProfileDetails.empty();
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
+      body: isGuest
+          ? _buildGuestMessage()
+          : FutureBuilder<ProfileDetails>(
+              future: _profileFuture,
+              builder: (context, snapshot) {
+                final details = snapshot.data ?? const ProfileDetails.empty();
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
 
-          return ListView(
-            padding: const EdgeInsets.all(20),
-            children: [
-              _ProfileHeader(name: details.fullName, email: details.email),
-              const SizedBox(height: 20),
-              _InfoTile(label: 'User ID', value: details.userId),
-              _InfoTile(
-                label: 'Total Distance',
-                value: '${details.totalDistanceKm.toStringAsFixed(1)} km',
-              ),
-              _InfoTile(label: 'Total Rides', value: details.totalRides.toString()),
-              _InfoTile(label: 'Score', value: details.scoreLabel),
-              const SizedBox(height: 20),
-              const Text(
-                'Map preferences',
-                style: TextStyle(color: Colors.grey, fontSize: 12),
-              ),
-              const SizedBox(height: 10),
-              _PreferenceTile(
-                label: 'Avoid cobblestones',
-                subtitle: 'Prefer smoother surfaces when routing',
-                value: _avoidCobblestones,
-                onChanged: (value) {
-                  setState(() => _avoidCobblestones = value);
-                  _updatePreference('avoid_cobblestones', value);
-                },
-              ),
-              _PreferenceTile(
-                label: 'Show water fountains',
-                subtitle: 'Display nearby fountains on the map',
-                value: _showFountains,
-                onChanged: (value) {
-                  setState(() => _showFountains = value);
-                  _updatePreference('show_fountains', value);
-                },
-              ),
-              const SizedBox(height: 20),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: _signOut,
-                  icon: const Icon(Icons.logout),
-                  label: const Text('Sign Out'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: Colors.black,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                  ),
-                ),
-              ),
-            ],
-          );
-        },
-      ),
-      bottomNavigationBar: AppBottomNav(
-        currentIndex: 3,
-        onTap: _onNavTap,
-      ),
+                return ListView(
+                  padding: const EdgeInsets.all(20),
+                  children: [
+                    _ProfileHeader(
+                      name: details.fullName,
+                      email: details.email,
+                    ),
+                    const SizedBox(height: 20),
+                    _InfoTile(label: 'User ID', value: details.userId),
+                    _InfoTile(
+                      label: 'Total Distance',
+                      value: '${details.totalDistanceKm.toStringAsFixed(1)} km',
+                    ),
+                    _InfoTile(
+                      label: 'Total Rides',
+                      value: details.totalRides.toString(),
+                    ),
+                    _InfoTile(label: 'Score', value: details.scoreLabel),
+                    const SizedBox(height: 20),
+                    const Text(
+                      'Map preferences',
+                      style: TextStyle(color: Colors.grey, fontSize: 12),
+                    ),
+                    const SizedBox(height: 10),
+                    _PreferenceTile(
+                      label: 'Avoid cobblestones',
+                      subtitle: 'Prefer smoother surfaces when routing',
+                      value: _avoidCobblestones,
+                      onChanged: (value) {
+                        setState(() => _avoidCobblestones = value);
+                        _updatePreference('avoid_cobblestones', value);
+                      },
+                    ),
+                    _PreferenceTile(
+                      label: 'Show water fountains',
+                      subtitle: 'Display nearby fountains on the map',
+                      value: _showFountains,
+                      onChanged: (value) {
+                        setState(() => _showFountains = value);
+                        _updatePreference('show_fountains', value);
+                      },
+                    ),
+                    const SizedBox(height: 20),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: _signOut,
+                        icon: const Icon(Icons.logout),
+                        label: const Text('Sign Out'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.white,
+                          foregroundColor: Colors.black,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+      bottomNavigationBar: AppBottomNav(currentIndex: 3, onTap: _onNavTap),
     );
   }
 
@@ -260,12 +315,12 @@ class ProfileDetails {
   });
 
   const ProfileDetails.empty()
-      : userId = '-',
-        email = null,
-        fullName = 'Cyclist',
-        totalDistanceKm = 0,
-        totalRides = 0,
-        scoreLabel = '-';
+    : userId = '-',
+      email = null,
+      fullName = 'Cyclist',
+      totalDistanceKm = 0,
+      totalRides = 0,
+      scoreLabel = '-';
 }
 
 class _ProfileHeader extends StatelessWidget {

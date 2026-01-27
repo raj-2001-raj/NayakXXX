@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'recording_screen.dart';
+import 'dashboard_screen.dart';
 
 class RideSummaryScreen extends StatefulWidget {
   final List<LatLng> routePoints;
@@ -41,14 +42,28 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
     _avgSpeedKmh = _computeAverageSpeed();
   }
 
+  /// Returns true if user has anything to report or verify
+  bool get _hasReportsToReview =>
+      _autoReports.isNotEmpty || _manualReports.isNotEmpty;
+
+  /// End ride without publishing (when no reports)
+  void _endRide() {
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const DashboardScreen()),
+      (route) => false,
+    );
+  }
+
   Future<void> _saveAndPublish() async {
     if (_saving) return;
 
-    final confirmedAuto = _autoReports.where((r) => r.isVerified).toList();
+    // Save ALL auto-detected reports (verified or not) - community will validate
+    // User-verified ones get `verified: true`, unverified get `verified: false`
+    final allAutoReports = _autoReports.toList();
     for (final manual in _manualReports) {
       manual.isVerified = true; // manual reports are always accepted
     }
-    final toSave = [..._manualReports, ...confirmedAuto];
+    final toSave = [..._manualReports, ...allAutoReports];
 
     if (toSave.isEmpty) {
       if (mounted) {
@@ -62,28 +77,60 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
     setState(() => _saving = true);
 
     try {
+      final userId = Supabase.instance.client.auth.currentUser?.id;
+
+      // Check if user is logged in
+      if (userId == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Please log in to save your reports. Reports will be lost!',
+              ),
+              backgroundColor: Colors.orange,
+              duration: Duration(seconds: 3),
+            ),
+          );
+        }
+        setState(() => _saving = false);
+        return;
+      }
+
+      debugPrint('[RideSummary] Saving ${toSave.length} anomalies for user $userId');
+      int savedCount = 0;
       for (final report in toSave) {
-        final userId = Supabase.instance.client.auth.currentUser?.id;
         final type = _mapCategoryToType(report.category);
         final severity = _mapSeverity(report.category);
         final locationWkt =
             'SRID=4326;POINT(${report.location.longitude} ${report.location.latitude})';
-        await Supabase.instance.client.from('anomalies').insert({
-          'user_id': userId,
-          'ride_id': widget.rideId,
-          'type': type,
-          'severity': severity,
-          'location': locationWkt,
-          'verified': report.isVerified,
-          'category': report.category,
-        });
+        try {
+          await Supabase.instance.client.from('anomalies').insert({
+            'user_id': userId,
+            'ride_id': widget.rideId,
+            'type': type,
+            'severity': severity,
+            'location': locationWkt,
+            'verified': report.isVerified,
+            'category': report.category,
+          });
+          savedCount++;
+          debugPrint('[RideSummary] Saved anomaly: $type at ${report.location}');
+        } catch (e) {
+          debugPrint('[RideSummary] Failed to save anomaly: $e');
+        }
       }
+
+      debugPrint('[RideSummary] Successfully saved $savedCount/${toSave.length} anomalies');
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Saved ${toSave.length} reports.')),
+          SnackBar(content: Text('Saved $savedCount reports. Contribution score updated!')),
         );
-        Navigator.of(context).pop();
+        // Navigate back to home screen
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const DashboardScreen()),
+          (route) => false,
+        );
       }
     } catch (e) {
       if (mounted) {
@@ -157,7 +204,9 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
             child: SizedBox(
               width: double.infinity,
               child: ElevatedButton(
-                onPressed: _saving ? null : _saveAndPublish,
+                onPressed: _saving
+                    ? null
+                    : (_hasReportsToReview ? _saveAndPublish : _endRide),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.white,
                   foregroundColor: Colors.black,
@@ -167,7 +216,9 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
                   ),
                 ),
                 child: Text(
-                  _saving ? 'SAVING...' : 'SAVE & PUBLISH',
+                  _saving
+                      ? 'SAVING...'
+                      : (_hasReportsToReview ? 'SAVE & PUBLISH' : 'END RIDE'),
                   style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
               ),
@@ -189,15 +240,17 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
   }
 
   double _computeAverageSpeed() {
-    final seconds = widget.rideDuration.inSeconds;
+    final seconds = widget.rideDuration.inSeconds.abs(); // Use absolute value
     if (seconds == 0) return 0;
     return _distanceKm / (seconds / 3600);
   }
 
   String _formatDuration(Duration duration) {
-    final hours = duration.inHours;
-    final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
-    final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
+    // Handle negative durations by using absolute value
+    final totalSeconds = duration.inSeconds.abs();
+    final hours = totalSeconds ~/ 3600;
+    final minutes = ((totalSeconds % 3600) ~/ 60).toString().padLeft(2, '0');
+    final seconds = (totalSeconds % 60).toString().padLeft(2, '0');
     return hours > 0 ? '$hours:$minutes:$seconds' : '$minutes:$seconds';
   }
 
