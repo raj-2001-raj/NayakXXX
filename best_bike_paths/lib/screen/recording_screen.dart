@@ -53,8 +53,43 @@ class RouteRecommendation {
 class AnomalyPoint {
   final LatLng location;
   final double weight;
+  final String? trustLevel; // verified_strong, verified, likely, reported, unverified
+  final int? daysUntilExpiry;
+  final int upvotes;
+  final int downvotes;
 
-  const AnomalyPoint({required this.location, required this.weight});
+  const AnomalyPoint({
+    required this.location, 
+    required this.weight,
+    this.trustLevel,
+    this.daysUntilExpiry,
+    this.upvotes = 0,
+    this.downvotes = 0,
+  });
+  
+  /// Get opacity based on trust level
+  double get opacity {
+    switch (trustLevel) {
+      case 'verified_strong': return 1.0;
+      case 'verified': return 0.95;
+      case 'likely': return 0.85;
+      case 'reported': return 0.7;
+      case 'unverified': return 0.5;
+      default: return 0.8;
+    }
+  }
+  
+  /// Get marker size multiplier based on trust level
+  double get sizeMultiplier {
+    switch (trustLevel) {
+      case 'verified_strong': return 1.2;
+      case 'verified': return 1.1;
+      case 'likely': return 1.0;
+      case 'reported': return 0.9;
+      case 'unverified': return 0.8;
+      default: return 1.0;
+    }
+  }
 }
 
 class FountainPoint {
@@ -150,7 +185,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     WidgetsBinding.instance.addObserver(this);
     _initializeLocation();
     _loadPreferencesAndData();
-    _fetchWeather();
+    // Note: _fetchWeather() is now called inside _initializeLocation after GPS is ready
     // If resuming a specific ride from dashboard, handle that
     if (widget.resumeRideId != null) {
       _resumeSpecificRide(widget.resumeRideId!);
@@ -202,6 +237,32 @@ class _RecordingScreenState extends State<RecordingScreen>
     _positionSub = Geolocator.getPositionStream(
       locationSettings: settings,
     ).listen(_onPositionUpdate);
+    debugPrint('[GPS] Location stream started');
+  }
+
+  /// Locate me button - zoom to current location
+  Future<void> _locateMe() async {
+    try {
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 10),
+        ),
+      );
+      final loc = LatLng(position.latitude, position.longitude);
+      setState(() {
+        _currentLocation = loc;
+      });
+      _mapController.move(loc, 16);
+      debugPrint('[GPS] Located user at $loc');
+    } catch (e) {
+      debugPrint('[GPS] Error locating user: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not get current location')),
+        );
+      }
+    }
   }
 
   void _onPositionUpdate(Position pos) {
@@ -467,6 +528,11 @@ class _RecordingScreenState extends State<RecordingScreen>
       });
       _sensorService.updateSpeed(_currentSpeedMps);
       _mapController.move(_currentLocation, 15);
+      // Start continuous location stream (GPS always on)
+      _startLocationStream();
+      // Fetch weather after we have real GPS coordinates
+      debugPrint('[WEATHER] Fetching weather for ${position.latitude}, ${position.longitude}');
+      _fetchWeather();
     }
   }
 
@@ -696,16 +762,16 @@ class _RecordingScreenState extends State<RecordingScreen>
   }
 
   /// Fetch anomaly points from the database
-  /// TODO: Add RPC function in Supabase to filter by bounding box for better performance
-  /// Currently fetches all anomalies - may be slow with large datasets
+  /// Uses active_anomalies view which filters out expired/removed anomalies
   Future<List<AnomalyPoint>> _fetchAnomalyPoints() async {
     try {
+      // Use active_anomalies view for proper lifecycle filtering
       final rows =
           await Supabase.instance.client
-                  .from('anomalies')
-                  .select('id,location,severity,category,verified')
+                  .from('active_anomalies')
+                  .select('id,location,severity,category,verified,upvotes,downvotes,trust_level,days_until_expiry')
                   .order('created_at', ascending: false)
-                  .limit(1000)
+                  .limit(500)
               as List<dynamic>;
 
       // Store full data for verification dialog
@@ -717,7 +783,25 @@ class _RecordingScreenState extends State<RecordingScreen>
           .toList();
     } catch (e) {
       debugPrint('Failed to fetch anomalies: $e');
-      return [];
+      // Fallback to anomalies table if view doesn't exist yet
+      try {
+        final rows =
+            await Supabase.instance.client
+                    .from('anomalies')
+                    .select('id,location,severity,category,verified,upvotes,downvotes')
+                    .filter('expires_at', 'is', null) // Only non-expired
+                    .order('created_at', ascending: false)
+                    .limit(500)
+                as List<dynamic>;
+        _fetchedAnomaliesRaw = rows.cast<Map<String, dynamic>>();
+        return rows
+            .map((row) => _parseAnomalyPoint(row))
+            .whereType<AnomalyPoint>()
+            .toList();
+      } catch (e2) {
+        debugPrint('Fallback also failed: $e2');
+        return [];
+      }
     }
   }
 
@@ -748,7 +832,14 @@ class _RecordingScreenState extends State<RecordingScreen>
     final location = _parseGeoPoint(row['location']);
     if (location == null) return null;
     final severity = row['severity']?.toString();
-    return AnomalyPoint(location: location, weight: _severityWeight(severity));
+    return AnomalyPoint(
+      location: location, 
+      weight: _severityWeight(severity),
+      trustLevel: row['trust_level']?.toString(),
+      daysUntilExpiry: row['days_until_expiry'] as int?,
+      upvotes: (row['upvotes'] as num?)?.toInt() ?? 0,
+      downvotes: (row['downvotes'] as num?)?.toInt() ?? 0,
+    );
   }
 
   double _severityWeight(String? severity) {
@@ -1331,13 +1422,16 @@ class _RecordingScreenState extends State<RecordingScreen>
   // ========== WEATHER ALERTS ==========
 
   Future<void> _fetchWeather() async {
+    debugPrint('[WEATHER] Starting weather fetch...');
     final weather = await _weatherService.getWeather(
       _currentLocation.latitude,
       _currentLocation.longitude,
     );
+    debugPrint('[WEATHER] Weather result: ${weather?.temperature}°C, ${weather?.condition}');
     if (mounted && weather != null) {
       setState(() {
         _weatherData = weather;
+        debugPrint('[WEATHER] Weather data set: ${_weatherData?.temperature}°C');
         // Show weather alert banner if there are warnings or dangers
         _showWeatherAlerts = weather.alerts.any(
           (a) =>
@@ -1345,6 +1439,8 @@ class _RecordingScreenState extends State<RecordingScreen>
               a.severity == AlertSeverity.danger,
         );
       });
+    } else {
+      debugPrint('[WEATHER] Weather fetch failed or widget not mounted');
     }
   }
 
@@ -1407,6 +1503,168 @@ class _RecordingScreenState extends State<RecordingScreen>
         ],
       ),
     );
+  }
+
+  /// Build a compact weather info chip that's always visible
+  Widget _buildWeatherInfoChip() {
+    debugPrint('[WEATHER] Building weather chip, _weatherData is ${_weatherData != null ? "available" : "null"}');
+    if (_weatherData == null) return const SizedBox.shrink();
+
+    final weather = _weatherData!;
+    final icon = _getWeatherConditionIcon(weather.condition);
+    final isSafe = weather.isSafeForCycling;
+    debugPrint('[WEATHER] Chip: ${weather.temperature}°C, icon: $icon, safe: $isSafe');
+
+    return GestureDetector(
+      onTap: () {
+        // Show detailed weather info
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: const Color(0xFF1E1E1E),
+            title: Row(
+              children: [
+                Text(icon, style: const TextStyle(fontSize: 24)),
+                const SizedBox(width: 8),
+                const Text(
+                  'Weather Conditions',
+                  style: TextStyle(color: Colors.white),
+                ),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  weather.description,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                _buildWeatherDetailRow('🌡️', 'Temperature', '${weather.temperature.toStringAsFixed(1)}°C'),
+                _buildWeatherDetailRow('💨', 'Wind', '${weather.windSpeed.toStringAsFixed(1)} m/s'),
+                _buildWeatherDetailRow('💧', 'Humidity', '${weather.humidity.toStringAsFixed(0)}%'),
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: isSafe ? Colors.green.withOpacity(0.2) : Colors.red.withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: isSafe ? Colors.green : Colors.red,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        isSafe ? Icons.check_circle : Icons.warning,
+                        color: isSafe ? Colors.green : Colors.red,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          weather.cyclingAdvice,
+                          style: TextStyle(
+                            color: isSafe ? Colors.green.shade300 : Colors.red.shade300,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('OK', style: TextStyle(color: Color(0xFF00FF00))),
+              ),
+            ],
+          ),
+        );
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: isSafe
+              ? Colors.green.withOpacity(0.85)
+              : Colors.orange.withOpacity(0.85),
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.3),
+              blurRadius: 4,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(icon, style: const TextStyle(fontSize: 16)),
+            const SizedBox(width: 4),
+            Text(
+              '${weather.temperature.toStringAsFixed(0)}°C',
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 13,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWeatherDetailRow(String icon, String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Text(icon, style: const TextStyle(fontSize: 16)),
+          const SizedBox(width: 8),
+          Text(
+            '$label: ',
+            style: const TextStyle(color: Colors.grey, fontSize: 14),
+          ),
+          Text(
+            value,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.bold,
+              fontSize: 14,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _getWeatherConditionIcon(WeatherCondition condition) {
+    switch (condition) {
+      case WeatherCondition.clear:
+        return '☀️';
+      case WeatherCondition.cloudy:
+        return '☁️';
+      case WeatherCondition.rain:
+        return '🌧️';
+      case WeatherCondition.heavyRain:
+        return '⛈️';
+      case WeatherCondition.snow:
+        return '❄️';
+      case WeatherCondition.fog:
+        return '🌫️';
+      case WeatherCondition.wind:
+        return '💨';
+      case WeatherCondition.storm:
+        return '🌩️';
+    }
   }
 
   // ========== SEGMENT COLORING ==========
@@ -1560,17 +1818,30 @@ class _RecordingScreenState extends State<RecordingScreen>
                       return Polyline(
                         points: option.points,
                         strokeWidth: selected ? 5.0 : 3.0,
+                        // Green for selected route (remaining path to cover)
                         color: selected
                             ? const Color(0xFF00FF00)
                             : Colors.blueGrey.withOpacity(0.6),
                       );
                     }).toList(),
                   ),
+                // Show covered path (ride path) in YELLOW
+                if (_ridePath.isNotEmpty)
+                  PolylineLayer(
+                    polylines: [
+                      Polyline(
+                        points: _ridePath,
+                        strokeWidth: 6.0,
+                        color: Colors.amber, // Yellow for covered path
+                      ),
+                    ],
+                  ),
                 // Colored segments overlay (safety score visualization)
                 if (_showColoredSegments && _coloredSegments.isNotEmpty)
                   PolylineLayer(polylines: _buildColoredPolylines()),
                 MarkerLayer(
                   markers: [
+                    // Current location marker (blue navigation arrow)
                     Marker(
                       point: _currentLocation,
                       width: 40,
@@ -1581,6 +1852,70 @@ class _RecordingScreenState extends State<RecordingScreen>
                         size: 40,
                       ),
                     ),
+                    // START marker (green flag)
+                    if (_startLocation != null)
+                      Marker(
+                        point: _startLocation!,
+                        width: 50,
+                        height: 50,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: Colors.green,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: const Text(
+                                'START',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                            const Icon(
+                              Icons.location_on,
+                              color: Colors.green,
+                              size: 30,
+                            ),
+                          ],
+                        ),
+                      ),
+                    // DESTINATION marker (red flag)
+                    if (_destinationPoint != null)
+                      Marker(
+                        point: _destinationPoint!,
+                        width: 50,
+                        height: 60,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: Colors.red,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: const Text(
+                                'DESTINATION',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                            const Icon(
+                              Icons.flag,
+                              color: Colors.red,
+                              size: 30,
+                            ),
+                          ],
+                        ),
+                      ),
                     ..._sessionReports.map(
                       (r) => Marker(
                         point: r.location,
@@ -1606,6 +1941,7 @@ class _RecordingScreenState extends State<RecordingScreen>
                       ),
                     ),
                     // Tappable anomaly markers for verification
+                    // Markers are sized and styled based on trust level
                     ..._fetchedAnomaliesRaw.map((anomaly) {
                       final loc = _parseGeoPoint(anomaly['location']);
                       if (loc == null)
@@ -1616,24 +1952,75 @@ class _RecordingScreenState extends State<RecordingScreen>
                       final category =
                           anomaly['category']?.toString() ?? 'Unknown';
                       final verified = anomaly['verified'] == true;
+                      final trustLevel = anomaly['trust_level']?.toString() ?? 'unverified';
+                      final upvotes = (anomaly['upvotes'] as num?)?.toInt() ?? 0;
+                      final downvotes = (anomaly['downvotes'] as num?)?.toInt() ?? 0;
+                      
+                      // Calculate opacity and size based on trust level
+                      double opacity;
+                      double size;
+                      switch (trustLevel) {
+                        case 'verified_strong':
+                          opacity = 1.0;
+                          size = 38;
+                          break;
+                        case 'verified':
+                          opacity = 0.95;
+                          size = 34;
+                          break;
+                        case 'likely':
+                          opacity = 0.85;
+                          size = 32;
+                          break;
+                        case 'reported':
+                          opacity = 0.7;
+                          size = 28;
+                          break;
+                        case 'unverified':
+                        default:
+                          opacity = 0.5;
+                          size = 24;
+                          break;
+                      }
+                      
+                      // Reduce opacity further if heavily downvoted
+                      if (downvotes > upvotes && downvotes >= 3) {
+                        opacity = opacity * 0.6;
+                      }
+                      
                       return Marker(
                         point: loc,
-                        width: 32,
-                        height: 32,
+                        width: size,
+                        height: size,
                         child: GestureDetector(
                           onTap: () => _showVerificationDialog(anomaly),
-                          child: Container(
-                            decoration: BoxDecoration(
-                              color: verified
-                                  ? Colors.green.withOpacity(0.8)
-                                  : Colors.red.withOpacity(0.8),
-                              shape: BoxShape.circle,
-                              border: Border.all(color: Colors.white, width: 2),
-                            ),
-                            child: Icon(
-                              _getAnomalyIcon(category),
-                              color: Colors.white,
-                              size: 16,
+                          child: Opacity(
+                            opacity: opacity,
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: verified
+                                    ? Colors.green.withOpacity(0.9)
+                                    : trustLevel == 'likely'
+                                        ? Colors.orange.withOpacity(0.9)
+                                        : Colors.red.withOpacity(0.9),
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: Colors.white, 
+                                  width: trustLevel == 'verified_strong' ? 3 : 2,
+                                ),
+                                boxShadow: verified ? [
+                                  BoxShadow(
+                                    color: Colors.green.withOpacity(0.5),
+                                    blurRadius: 6,
+                                    spreadRadius: 1,
+                                  )
+                                ] : null,
+                              ),
+                              child: Icon(
+                                _getAnomalyIcon(category),
+                                color: Colors.white,
+                                size: size * 0.5,
+                              ),
                             ),
                           ),
                         ),
@@ -1892,6 +2279,22 @@ class _RecordingScreenState extends State<RecordingScreen>
                 ),
               ),
 
+            // LOCATE ME button - helps user find their location
+            Positioned(
+              bottom: widget.guestMode ? 150 : 100,
+              right: 16,
+              child: FloatingActionButton(
+                heroTag: 'locate_me',
+                mini: true,
+                backgroundColor: Colors.white,
+                onPressed: _locateMe,
+                child: const Icon(
+                  Icons.my_location,
+                  color: Colors.blue,
+                ),
+              ),
+            ),
+
             // Color legend for segment coloring
             if (_showColoredSegments && _coloredSegments.isNotEmpty)
               Positioned(
@@ -1922,6 +2325,14 @@ class _RecordingScreenState extends State<RecordingScreen>
                     ],
                   ),
                 ),
+              ),
+
+            // Weather info chip (always visible when weather data available)
+            if (_weatherData != null)
+              Positioned(
+                top: 16,
+                right: 60,
+                child: _buildWeatherInfoChip(),
               ),
 
             // Guest mode info banner

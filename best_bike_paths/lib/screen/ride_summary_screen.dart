@@ -3,6 +3,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'recording_screen.dart';
 import 'dashboard_screen.dart';
+import '../services/weather_service.dart';
 
 class RideSummaryScreen extends StatefulWidget {
   final List<LatLng> routePoints;
@@ -32,6 +33,8 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
   late double _distanceKm;
   late double _avgSpeedKmh;
   bool _saving = false;
+  final WeatherService _weatherService = WeatherService();
+  WeatherData? _weatherData;
 
   @override
   void initState() {
@@ -40,6 +43,22 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
     _manualReports = widget.reports.where((r) => r.isManual).toList();
     _distanceKm = _computeDistanceKm(widget.routePoints);
     _avgSpeedKmh = _computeAverageSpeed();
+    _fetchWeatherForRide();
+  }
+
+  /// Fetch weather data for the ride location (RASD: Trip Enrichment)
+  Future<void> _fetchWeatherForRide() async {
+    try {
+      final weather = await _weatherService.getWeather(
+        widget.endPoint.latitude,
+        widget.endPoint.longitude,
+      );
+      if (mounted && weather != null) {
+        setState(() => _weatherData = weather);
+      }
+    } catch (e) {
+      debugPrint('[RideSummary] Failed to fetch weather: $e');
+    }
   }
 
   /// Returns true if user has anything to report or verify
@@ -48,10 +67,36 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
 
   /// End ride without publishing (when no reports)
   void _endRide() {
+    _saveWeatherToRide(); // Save weather even without anomaly reports
     Navigator.of(context).pushAndRemoveUntil(
       MaterialPageRoute(builder: (_) => const DashboardScreen()),
       (route) => false,
     );
+  }
+
+  /// Save weather data to the ride record (RASD: Trip Context Enrichment)
+  Future<void> _saveWeatherToRide() async {
+    if (widget.rideId == null || _weatherData == null) return;
+
+    try {
+      final weatherJson = {
+        'temperature': _weatherData!.temperature,
+        'humidity': _weatherData!.humidity,
+        'wind_speed': _weatherData!.windSpeed,
+        'condition': _weatherData!.condition.name,
+        'description': _weatherData!.description,
+        'timestamp': _weatherData!.timestamp.toIso8601String(),
+      };
+
+      await Supabase.instance.client
+          .from('rides')
+          .update({'weather_data': weatherJson})
+          .eq('id', widget.rideId!);
+
+      debugPrint('[RideSummary] Saved weather data to ride: $weatherJson');
+    } catch (e) {
+      debugPrint('[RideSummary] Failed to save weather: $e');
+    }
   }
 
   Future<void> _saveAndPublish() async {
@@ -96,7 +141,9 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
         return;
       }
 
-      debugPrint('[RideSummary] Saving ${toSave.length} anomalies for user $userId');
+      debugPrint(
+        '[RideSummary] Saving ${toSave.length} anomalies for user $userId',
+      );
       int savedCount = 0;
       for (final report in toSave) {
         final type = _mapCategoryToType(report.category);
@@ -114,17 +161,28 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
             'category': report.category,
           });
           savedCount++;
-          debugPrint('[RideSummary] Saved anomaly: $type at ${report.location}');
+          debugPrint(
+            '[RideSummary] Saved anomaly: $type at ${report.location}',
+          );
         } catch (e) {
           debugPrint('[RideSummary] Failed to save anomaly: $e');
         }
       }
 
-      debugPrint('[RideSummary] Successfully saved $savedCount/${toSave.length} anomalies');
+      debugPrint(
+        '[RideSummary] Successfully saved $savedCount/${toSave.length} anomalies',
+      );
+
+      // Save weather data to ride record
+      await _saveWeatherToRide();
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Saved $savedCount reports. Contribution score updated!')),
+          SnackBar(
+            content: Text(
+              'Saved $savedCount reports. Contribution score updated!',
+            ),
+          ),
         );
         // Navigate back to home screen
         Navigator.of(context).pushAndRemoveUntil(
@@ -155,6 +213,8 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
       ),
       body: Column(
         children: [
+          // Weather conditions banner (RASD: Trip Enrichment)
+          if (_weatherData != null) _buildWeatherBanner(),
           Container(
             padding: const EdgeInsets.symmetric(vertical: 20),
             child: Row(
@@ -227,6 +287,79 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
         ],
       ),
     );
+  }
+
+  /// Build weather banner showing conditions during ride (RASD: Trip Enrichment)
+  Widget _buildWeatherBanner() {
+    if (_weatherData == null) return const SizedBox.shrink();
+
+    final weather = _weatherData!;
+    final icon = _getWeatherIcon(weather.condition);
+    final bgColor = weather.isSafeForCycling
+        ? const Color(0xFF1E3A1E)
+        : const Color(0xFF3A1E1E);
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: bgColor,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: weather.isSafeForCycling
+              ? Colors.green.shade700
+              : Colors.red.shade700,
+          width: 1,
+        ),
+      ),
+      child: Row(
+        children: [
+          Text(icon, style: const TextStyle(fontSize: 28)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Ride Conditions: ${weather.description}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '${weather.temperature.toStringAsFixed(0)}°C • Wind: ${weather.windSpeed.toStringAsFixed(1)} m/s • ${weather.humidity.toStringAsFixed(0)}% humidity',
+                  style: TextStyle(color: Colors.grey.shade300, fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _getWeatherIcon(WeatherCondition condition) {
+    switch (condition) {
+      case WeatherCondition.clear:
+        return '☀️';
+      case WeatherCondition.cloudy:
+        return '☁️';
+      case WeatherCondition.rain:
+        return '🌧️';
+      case WeatherCondition.heavyRain:
+        return '⛈️';
+      case WeatherCondition.snow:
+        return '❄️';
+      case WeatherCondition.fog:
+        return '🌫️';
+      case WeatherCondition.wind:
+        return '💨';
+      case WeatherCondition.storm:
+        return '🌩️';
+    }
   }
 
   double _computeDistanceKm(List<LatLng> points) {

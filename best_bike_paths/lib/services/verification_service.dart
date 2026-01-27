@@ -11,15 +11,41 @@ enum VoteType {
 class VerificationResult {
   final bool success;
   final String message;
+  final String? action; // 'added', 'changed', 'removed'
   final int newUpvotes;
   final int newDownvotes;
+  final int verificationScore; // 0-100 percentage
+  final bool isVerified;
+  final VoteType? userVote;
 
   const VerificationResult({
     required this.success,
     required this.message,
+    this.action,
     this.newUpvotes = 0,
     this.newDownvotes = 0,
+    this.verificationScore = 50,
+    this.isVerified = false,
+    this.userVote,
   });
+
+  factory VerificationResult.fromJson(Map<String, dynamic> json) {
+    VoteType? userVote;
+    final voteStr = json['user_vote']?.toString();
+    if (voteStr == 'upvote') userVote = VoteType.upvote;
+    if (voteStr == 'downvote') userVote = VoteType.downvote;
+
+    return VerificationResult(
+      success: json['success'] == true,
+      message: json['message']?.toString() ?? '',
+      action: json['action']?.toString(),
+      newUpvotes: (json['upvotes'] as num?)?.toInt() ?? 0,
+      newDownvotes: (json['downvotes'] as num?)?.toInt() ?? 0,
+      verificationScore: (json['verification_score'] as num?)?.toInt() ?? 50,
+      isVerified: json['verified'] == true,
+      userVote: userVote,
+    );
+  }
 }
 
 /// Service for verifying/validating anomaly reports
@@ -46,12 +72,35 @@ class VerificationService {
       if (voteStr == 'downvote') return VoteType.downvote;
       return null;
     } catch (e) {
-      debugPrint('Error checking user vote: $e');
+      debugPrint('[VOTE] Error checking user vote: $e');
       return null;
     }
   }
 
+  /// Check if current user is the reporter of an anomaly
+  Future<bool> isReporter(String anomalyId) async {
+    final userId = _supabase.auth.currentUser?.id;
+    if (userId == null) return false;
+
+    try {
+      final result = await _supabase
+          .from('anomalies')
+          .select('user_id')
+          .eq('id', anomalyId)
+          .maybeSingle();
+
+      return result?['user_id'] == userId;
+    } catch (e) {
+      debugPrint('[VOTE] Error checking reporter: $e');
+      return false;
+    }
+  }
+
   /// Submit a vote on an anomaly
+  /// Rules:
+  /// 1. Reporter cannot vote on their own anomaly
+  /// 2. Other users can vote once, then can only remove
+  /// 3. After removing, they can vote again
   Future<VerificationResult> vote(String anomalyId, VoteType voteType) async {
     final userId = _supabase.auth.currentUser?.id;
     if (userId == null) {
@@ -61,74 +110,104 @@ class VerificationService {
       );
     }
 
+    debugPrint('[VOTE] Voting on anomaly $anomalyId: ${voteType.name}');
+
     try {
-      // Check if user has already voted
-      final existingVote = await getUserVote(anomalyId);
+      // Use the database RPC function (handles all rules)
+      final rpcResult = await _supabase.rpc(
+        'upsert_anomaly_vote',
+        params: {
+          'p_anomaly_id': anomalyId,
+          'p_vote_type': voteType.name,
+          'p_proximity_meters': null,
+          'p_comment': null,
+        },
+      );
 
-      if (existingVote != null) {
-        if (existingVote == voteType) {
-          // Same vote - remove it (toggle off)
-          await _supabase
-              .from('anomaly_votes')
-              .delete()
-              .eq('anomaly_id', anomalyId)
-              .eq('user_id', userId);
+      if (rpcResult is Map<String, dynamic>) {
+        debugPrint('[VOTE] RPC result: $rpcResult');
+        return VerificationResult.fromJson(rpcResult);
+      }
 
-          // Update anomaly vote counts
-          await _updateAnomalyVoteCounts(anomalyId);
-
-          return VerificationResult(
-            success: true,
-            message: 'Vote removed',
-            newUpvotes: await _getVoteCount(anomalyId, VoteType.upvote),
-            newDownvotes: await _getVoteCount(anomalyId, VoteType.downvote),
-          );
-        } else {
-          // Different vote - update it
-          await _supabase
-              .from('anomaly_votes')
-              .update({'vote_type': voteType.name})
-              .eq('anomaly_id', anomalyId)
-              .eq('user_id', userId);
-
-          await _updateAnomalyVoteCounts(anomalyId);
-
-          return VerificationResult(
-            success: true,
-            message: voteType == VoteType.upvote
-                ? 'Thanks for confirming this hazard!'
-                : 'Thanks for reporting this may be fixed',
-            newUpvotes: await _getVoteCount(anomalyId, VoteType.upvote),
-            newDownvotes: await _getVoteCount(anomalyId, VoteType.downvote),
-          );
-        }
-      } else {
-        // New vote
-        await _supabase.from('anomaly_votes').insert({
-          'anomaly_id': anomalyId,
-          'user_id': userId,
-          'vote_type': voteType.name,
-          'created_at': DateTime.now().toIso8601String(),
-        });
-
-        await _updateAnomalyVoteCounts(anomalyId);
-
-        return VerificationResult(
-          success: true,
-          message: voteType == VoteType.upvote
-              ? 'Thanks for confirming this hazard!'
-              : 'Thanks for reporting this may be fixed',
-          newUpvotes: await _getVoteCount(anomalyId, VoteType.upvote),
-          newDownvotes: await _getVoteCount(anomalyId, VoteType.downvote),
+      return const VerificationResult(
+        success: false,
+        message: 'Unexpected response from server',
+      );
+    } catch (e) {
+      debugPrint('[VOTE] Error: $e');
+      
+      // Parse error message for user-friendly display
+      final errorMsg = e.toString();
+      if (errorMsg.contains('cannot vote on your own')) {
+        return const VerificationResult(
+          success: false,
+          message: 'You cannot vote on your own report',
         );
       }
-    } catch (e) {
-      debugPrint('Error voting: $e');
-      return VerificationResult(
+      if (errorMsg.contains('Remove your current vote')) {
+        return const VerificationResult(
+          success: false,
+          message: 'Remove your current vote first',
+        );
+      }
+      
+      return const VerificationResult(
         success: false,
-        message: 'Failed to submit vote: $e',
+        message: 'Failed to vote. Please try again.',
       );
     }
+  }
+
+  /// Reporter updates their anomaly status (still there / resolved)
+  Future<VerificationResult> updateReporterStatus(String anomalyId, String status) async {
+    final userId = _supabase.auth.currentUser?.id;
+    if (userId == null) {
+      return const VerificationResult(
+        success: false,
+        message: 'You must be signed in',
+      );
+    }
+
+    try {
+      final rpcResult = await _supabase.rpc(
+        'update_anomaly_status_by_reporter',
+        params: {
+          'p_anomaly_id': anomalyId,
+          'p_status': status, // 'still_there' or 'resolved'
+        },
+      );
+
+      if (rpcResult is Map<String, dynamic>) {
+        return VerificationResult(
+          success: rpcResult['success'] == true,
+          message: rpcResult['message']?.toString() ?? '',
+        );
+      }
+
+      return const VerificationResult(
+        success: false,
+        message: 'Unexpected response',
+      );
+    } catch (e) {
+      debugPrint('[VOTE] Reporter status update error: $e');
+      return const VerificationResult(
+        success: false,
+        message: 'Failed to update status',
+      );
+    }
+  }
+
+  /// Remove user's vote (for UI that shows explicit remove button)
+  Future<VerificationResult> removeVote(String anomalyId) async {
+    final existingVote = await getUserVote(anomalyId);
+    if (existingVote == null) {
+      return const VerificationResult(
+        success: false,
+        message: 'No vote to remove',
+      );
+    }
+    // Clicking same vote type removes it
+    return vote(anomalyId, existingVote);
   }
 
   /// Get vote count for an anomaly
@@ -204,6 +283,7 @@ class AnomalyDetails {
   final DateTime createdAt;
   final String? description;
   final VoteType? userVote;
+  final int totalVoters;
 
   const AnomalyDetails({
     required this.id,
@@ -215,6 +295,7 @@ class AnomalyDetails {
     required this.createdAt,
     this.description,
     this.userVote,
+    this.totalVoters = 0,
   });
 
   factory AnomalyDetails.fromJson(
@@ -233,20 +314,32 @@ class AnomalyDetails {
           DateTime.now(),
       description: json['description']?.toString(),
       userVote: userVote,
+      totalVoters: ((json['upvotes'] as num?)?.toInt() ?? 0) + 
+                   ((json['downvotes'] as num?)?.toInt() ?? 0),
     );
   }
 
   /// Get verification status text
   String get verificationStatus {
-    if (verified) return 'Verified by community';
-    if (upvotes > 0) return '$upvotes user${upvotes > 1 ? 's' : ''} confirmed';
-    return 'Not yet verified';
+    if (verified) return '✓ Verified by community';
+    if (downvotes > upvotes) return '⚠️ Possibly fixed';
+    if (upvotes >= 2) return '👥 $upvotes users confirmed';
+    if (upvotes == 1) return '👤 1 user confirmed';
+    return '❓ Awaiting verification';
   }
 
-  /// Get confidence percentage
+  /// Get confidence percentage (0-100)
   int get confidencePercent {
     final total = upvotes + downvotes;
     if (total == 0) return 50;
     return ((upvotes / total) * 100).round();
+  }
+
+  /// Get status color name
+  String get statusColorName {
+    if (verified) return 'green';
+    if (downvotes > upvotes) return 'orange';
+    if (upvotes > 0) return 'yellow';
+    return 'grey';
   }
 }

@@ -27,6 +27,7 @@ class _VerificationDialogState extends State<VerificationDialog> {
   bool _loading = true;
   bool _voting = false;
   String? _message;
+  bool _isReporter = false; // Track if current user is the reporter
 
   @override
   void initState() {
@@ -40,10 +41,14 @@ class _VerificationDialogState extends State<VerificationDialog> {
     final details = await _verificationService.getAnomalyDetails(
       widget.anomalyId,
     );
+    
+    // Check if current user is the reporter
+    final isReporter = await _verificationService.isReporter(widget.anomalyId);
 
     if (mounted) {
       setState(() {
         _details = details;
+        _isReporter = isReporter;
         _loading = false;
       });
     }
@@ -62,21 +67,104 @@ class _VerificationDialogState extends State<VerificationDialog> {
         _voting = false;
         _message = result.message;
         if (result.success && _details != null) {
+          // Update details with new vote counts
           _details = AnomalyDetails(
             id: _details!.id,
             category: _details!.category,
             severity: _details!.severity,
-            verified:
-                result.newUpvotes >= 3 &&
-                result.newUpvotes > result.newDownvotes,
+            verified: result.isVerified || 
+                (result.newUpvotes >= 3 && result.newUpvotes > result.newDownvotes),
             upvotes: result.newUpvotes,
             downvotes: result.newDownvotes,
             createdAt: _details!.createdAt,
             description: _details!.description,
-            userVote: _details!.userVote == voteType ? null : voteType,
+            userVote: result.action == 'removed' ? null : result.userVote ?? voteType,
+            totalVoters: result.newUpvotes + result.newDownvotes,
           );
         }
       });
+
+      // Show snackbar feedback
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(result.message),
+            backgroundColor: result.success ? Colors.green.shade700 : Colors.red.shade700,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    }
+  }
+
+  /// Remove user's vote
+  Future<void> _removeVote() async {
+    setState(() {
+      _voting = true;
+      _message = null;
+    });
+
+    final result = await _verificationService.removeVote(widget.anomalyId);
+
+    if (mounted) {
+      setState(() {
+        _voting = false;
+        _message = result.message;
+        if (result.success && _details != null) {
+          _details = AnomalyDetails(
+            id: _details!.id,
+            category: _details!.category,
+            severity: _details!.severity,
+            verified: result.newUpvotes >= 3 && result.newUpvotes > result.newDownvotes,
+            upvotes: result.newUpvotes,
+            downvotes: result.newDownvotes,
+            createdAt: _details!.createdAt,
+            description: _details!.description,
+            userVote: null, // Vote removed
+            totalVoters: result.newUpvotes + result.newDownvotes,
+          );
+        }
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(result.message),
+            backgroundColor: result.success ? Colors.green.shade700 : Colors.red.shade700,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    }
+  }
+
+  /// Reporter updates status (still there / resolved)
+  Future<void> _updateReporterStatus(String status) async {
+    setState(() {
+      _voting = true;
+      _message = null;
+    });
+
+    final result = await _verificationService.updateReporterStatus(widget.anomalyId, status);
+
+    if (mounted) {
+      setState(() {
+        _voting = false;
+        _message = result.message;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(result.message),
+          backgroundColor: result.success ? Colors.green.shade700 : Colors.red.shade700,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+
+      // Close dialog if resolved
+      if (result.success && status == 'resolved') {
+        Navigator.of(context).pop(true); // Return true to indicate anomaly was resolved
+      }
     }
   }
 
@@ -209,48 +297,101 @@ class _VerificationDialogState extends State<VerificationDialog> {
 
               const SizedBox(height: 20),
 
-              // Voting buttons
-              const Text(
-                'Is this hazard still present?',
-                style: TextStyle(color: Colors.white, fontSize: 14),
-              ),
-              const SizedBox(height: 12),
-
-              Row(
-                children: [
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: _voting ? null : () => _vote(VoteType.upvote),
-                      icon: const Icon(Icons.check),
-                      label: const Text('YES, IT\'S THERE'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _details!.userVote == VoteType.upvote
-                            ? Colors.green
-                            : Colors.green.withOpacity(0.3),
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
+              // Show different UI based on whether user is reporter or other user
+              if (_isReporter) ...[
+                // REPORTER UI: Can only update status, not vote
+                const Text(
+                  'You reported this. Is it still there?',
+                  style: TextStyle(color: Colors.white, fontSize: 14),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: _voting ? null : () => _updateReporterStatus('still_there'),
+                        icon: const Icon(Icons.warning_amber),
+                        label: const Text('STILL THERE'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.orange.withOpacity(0.8),
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
                       ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: _voting ? null : () => _updateReporterStatus('resolved'),
+                        icon: const Icon(Icons.check_circle),
+                        label: const Text('RESOLVED'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green.withOpacity(0.8),
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ] else ...[
+                // OTHER USERS UI: Can vote or remove vote
+                Text(
+                  _details!.userVote != null 
+                      ? 'You voted. Tap again to remove your vote.'
+                      : 'Is this hazard still present?',
+                  style: const TextStyle(color: Colors.white, fontSize: 14),
+                ),
+                const SizedBox(height: 12),
+
+                if (_details!.userVote != null) ...[
+                  // User has voted - show remove button
+                  ElevatedButton.icon(
+                    onPressed: _voting ? null : _removeVote,
+                    icon: const Icon(Icons.undo),
+                    label: Text(
+                      'REMOVE MY ${_details!.userVote == VoteType.upvote ? "UPVOTE" : "DOWNVOTE"}',
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.grey.shade700,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      minimumSize: const Size(double.infinity, 48),
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: _voting
-                          ? null
-                          : () => _vote(VoteType.downvote),
-                      icon: const Icon(Icons.close),
-                      label: const Text('NO, IT\'S FIXED'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _details!.userVote == VoteType.downvote
-                            ? Colors.orange
-                            : Colors.orange.withOpacity(0.3),
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
+                ] else ...[
+                  // User hasn't voted - show vote buttons
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: _voting ? null : () => _vote(VoteType.upvote),
+                          icon: const Icon(Icons.check),
+                          label: const Text('YES, IT\'S THERE'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.green.withOpacity(0.8),
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                          ),
+                        ),
                       ),
-                    ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: _voting ? null : () => _vote(VoteType.downvote),
+                          icon: const Icon(Icons.close),
+                          label: const Text('NO, IT\'S FIXED'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.orange.withOpacity(0.8),
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
-              ),
+              ],
 
               if (_message != null) ...[
                 const SizedBox(height: 12),
