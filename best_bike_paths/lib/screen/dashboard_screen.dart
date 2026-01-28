@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'recording_screen.dart'; // This is your Map screen (renamed)
@@ -5,6 +7,7 @@ import 'auth_screen.dart';
 import 'history_screen.dart';
 import 'profile_screen.dart';
 import 'app_bottom_nav.dart';
+import '../services/local_cache_service.dart';
 
 /// Represents an unfinished ride that needs to be resolved
 class UnfinishedRide {
@@ -71,6 +74,11 @@ class _DashboardScreenState extends State<DashboardScreen>
   bool _automatedMode = true; // Toggle state [RASD Table 4]
   late Future<DashboardStats> _statsFuture;
   List<UnfinishedRide> _unfinishedRides = [];
+  
+  // Offline sync support
+  final LocalCacheService _cacheService = LocalCacheService.instance;
+  StreamSubscription<int>? _pendingCountSub;
+  int _pendingReportCount = 0;
 
   @override
   void initState() {
@@ -78,10 +86,20 @@ class _DashboardScreenState extends State<DashboardScreen>
     WidgetsBinding.instance.addObserver(this);
     _statsFuture = _fetchDashboardStats();
     _checkUnfinishedRides();
+    _initOfflineListener();
+  }
+  
+  void _initOfflineListener() {
+    _pendingCountSub = _cacheService.pendingCountStream.listen((count) {
+      if (mounted) {
+        setState(() => _pendingReportCount = count);
+      }
+    });
   }
 
   @override
   void dispose() {
+    _pendingCountSub?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -415,6 +433,31 @@ class _DashboardScreenState extends State<DashboardScreen>
           },
         ),
         actions: [
+          // Pending sync indicator
+          if (_pendingReportCount > 0)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade700,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.cloud_upload, color: Colors.white, size: 14),
+                      const SizedBox(width: 4),
+                      Text(
+                        '$_pendingReportCount',
+                        style: const TextStyle(color: Colors.white, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
           if (!isGuest)
             IconButton(
               icon: const Icon(Icons.refresh, color: Colors.grey),
@@ -727,6 +770,62 @@ class _DashboardScreenState extends State<DashboardScreen>
       } catch (_) {}
     }
 
+    // FALLBACK 1: Try to calculate from rides.distance_km column
+    if (totalDistanceKm == null || totalDistanceKm == 0) {
+      try {
+        final ridesWithDistance = await client
+            .from('rides')
+            .select('distance_km')
+            .eq('user_id', user.id) as List<dynamic>;
+        
+        double sumDistance = 0;
+        for (final ride in ridesWithDistance) {
+          final dist = _toDouble(ride['distance_km']);
+          if (dist != null && dist > 0) {
+            sumDistance += dist;
+          }
+        }
+        if (sumDistance > 0) {
+          totalDistanceKm = sumDistance;
+          debugPrint('Dashboard: Calculated total distance from rides.distance_km: $sumDistance km');
+        }
+      } catch (e) {
+        debugPrint('Dashboard: Failed to calculate distance from rides.distance_km: $e');
+      }
+    }
+    
+    // FALLBACK 2: Calculate straight-line distance from start/end coordinates
+    if (totalDistanceKm == null || totalDistanceKm == 0) {
+      try {
+        final ridesWithCoords = await client
+            .from('rides')
+            .select('start_lat,start_lon,end_lat,end_lon')
+            .eq('user_id', user.id) as List<dynamic>;
+        
+        double sumDistance = 0;
+        for (final ride in ridesWithCoords) {
+          final startLat = _toDouble(ride['start_lat']);
+          final startLon = _toDouble(ride['start_lon']);
+          final endLat = _toDouble(ride['end_lat']);
+          final endLon = _toDouble(ride['end_lon']);
+          
+          if (startLat != null && startLon != null && endLat != null && endLon != null) {
+            // Calculate straight-line distance using Haversine formula
+            final dist = _calculateDistanceKm(startLat, startLon, endLat, endLon);
+            if (dist > 0.01) { // Minimum 10 meters
+              sumDistance += dist;
+            }
+          }
+        }
+        if (sumDistance > 0) {
+          totalDistanceKm = sumDistance;
+          debugPrint('Dashboard: Calculated total distance from coordinates: $sumDistance km (estimated)');
+        }
+      } catch (e) {
+        debugPrint('Dashboard: Failed to calculate distance from coordinates: $e');
+      }
+    }
+
     // Always fetch live ride count from rides table
     int totalRides = 0;
     int anomalyCount = 0;
@@ -774,6 +873,21 @@ class _DashboardScreenState extends State<DashboardScreen>
     if (value is num) return value.toDouble();
     return double.tryParse(value.toString());
   }
+  
+  /// Calculate distance between two coordinates using Haversine formula
+  double _calculateDistanceKm(double lat1, double lon1, double lat2, double lon2) {
+    const double earthRadius = 6371; // km
+    final dLat = _toRadians(lat2 - lat1);
+    final dLon = _toRadians(lon2 - lon1);
+    final a = 
+        sin(dLat / 2) * sin(dLat / 2) +
+        cos(_toRadians(lat1)) * cos(_toRadians(lat2)) *
+        sin(dLon / 2) * sin(dLon / 2);
+    final c = 2 * atan2(sqrt(a), sqrt(1 - a));
+    return earthRadius * c;
+  }
+  
+  double _toRadians(double degrees) => degrees * pi / 180;
 }
 
 class DashboardStats {

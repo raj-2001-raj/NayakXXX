@@ -102,6 +102,83 @@ class _AuthScreenState extends State<AuthScreen> {
       }
     } on AuthException catch (e) {
       if (mounted) {
+        String errorMessage = e.message;
+        
+        // Handle email rate limit error with user-friendly message
+        if (e.message.toLowerCase().contains('rate') || 
+            e.message.toLowerCase().contains('limit') ||
+            e.message.toLowerCase().contains('exceeded') ||
+            e.statusCode == '429') {
+          errorMessage = "Too many sign-up attempts. Please try again in a few minutes, or continue as guest for now.";
+        }
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(errorMessage),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        String errorMessage = e.toString();
+        
+        // Handle rate limit errors from generic exceptions too
+        if (errorMessage.toLowerCase().contains('rate') || 
+            errorMessage.toLowerCase().contains('limit')) {
+          errorMessage = "Too many sign-up attempts. Please try again in a few minutes, or continue as guest for now.";
+        }
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(errorMessage),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  // --- LOGIC: GUEST MODE ---
+  void _continueAsGuest() {
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(builder: (_) => const DashboardScreen()),
+    );
+  }
+
+  // --- LOGIC: PASSWORD RESET ---
+  Future<void> _resetPassword() async {
+    final email = _emailController.text.trim();
+    
+    if (email.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Please enter your email address first"),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    setState(() => _isLoading = true);
+
+    try {
+      await Supabase.instance.client.auth.resetPasswordForEmail(email);
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Password reset link sent! Check your email."),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } on AuthException catch (e) {
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(e.message), backgroundColor: Colors.red),
         );
@@ -115,13 +192,6 @@ class _AuthScreenState extends State<AuthScreen> {
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
-  }
-
-  // --- LOGIC: GUEST MODE ---
-  void _continueAsGuest() {
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => const DashboardScreen()),
-    );
   }
 
   @override
@@ -198,6 +268,23 @@ class _AuthScreenState extends State<AuthScreen> {
                 Icons.lock,
                 isPassword: true,
               ),
+
+              // Forgot Password link (only visible on login)
+              if (_isLogin) ...[
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: _isLoading ? null : _resetPassword,
+                    child: const Text(
+                      "Forgot Password?",
+                      style: TextStyle(
+                        color: Color(0xFF00FF00),
+                        fontSize: 14,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
 
               if (!_isLogin) ...[
                 const SizedBox(height: 16),

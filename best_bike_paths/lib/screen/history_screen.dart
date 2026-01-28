@@ -51,29 +51,50 @@ class _HistoryScreenState extends State<HistoryScreen>
     if (user == null) return [];
 
     try {
+      // Try to fetch with end coordinates and distance_km
       final rows =
           await client
                   .from('rides')
                   .select(
-                    'id,start_time,end_time,start_lat,start_lon,end_lat,end_lon,completed,reached_destination',
+                    'id,start_time,end_time,start_lat,start_lon,end_lat,end_lon,distance_km',
                   )
                   .eq('user_id', user.id)
                   .order('start_time', ascending: false)
               as List<dynamic>;
 
+      debugPrint('[HISTORY] Fetched ${rows.length} rides with end coords');
       return rows.map((row) => RideHistoryEntry.fromJson(row)).toList();
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[HISTORY] Full query failed: $e');
       try {
+        // Fallback without distance_km
         final rows =
             await client
                     .from('rides')
-                    .select('id,start_time,end_time,start_lat,start_lon')
+                    .select(
+                      'id,start_time,end_time,start_lat,start_lon,end_lat,end_lon',
+                    )
                     .eq('user_id', user.id)
                     .order('start_time', ascending: false)
                 as List<dynamic>;
+        debugPrint('[HISTORY] Fetched ${rows.length} rides without distance_km');
         return rows.map((row) => RideHistoryEntry.fromJson(row)).toList();
-      } catch (_) {
-        return [];
+      } catch (e2) {
+        debugPrint('[HISTORY] Query without distance_km failed: $e2');
+        try {
+          // Minimal fallback
+          final rows =
+              await client
+                      .from('rides')
+                      .select('id,start_time,end_time,start_lat,start_lon')
+                      .eq('user_id', user.id)
+                      .order('start_time', ascending: false)
+                  as List<dynamic>;
+          debugPrint('[HISTORY] Fetched ${rows.length} rides (minimal)');
+          return rows.map((row) => RideHistoryEntry.fromJson(row)).toList();
+        } catch (_) {
+          return [];
+        }
       }
     }
   }
@@ -218,6 +239,7 @@ class RideHistoryEntry {
   final DateTime? endTime;
   final LatLng? startPoint;
   final LatLng? endPoint;
+  final double? storedDistanceKm;  // Distance stored in database
   final bool? completed;
   final bool? reachedDestination;
 
@@ -227,17 +249,25 @@ class RideHistoryEntry {
     required this.endTime,
     required this.startPoint,
     required this.endPoint,
+    this.storedDistanceKm,
     required this.completed,
     required this.reachedDestination,
   });
 
   factory RideHistoryEntry.fromJson(Map<String, dynamic> json) {
+    // Parse stored distance
+    double? storedDist;
+    if (json['distance_km'] != null) {
+      storedDist = double.tryParse(json['distance_km'].toString());
+    }
+    
     return RideHistoryEntry(
       id: json['id']?.toString() ?? '-',
       startTime: _parseDate(json['start_time']),
       endTime: _parseDate(json['end_time']),
       startPoint: _parseLatLng(json['start_lat'], json['start_lon']),
       endPoint: _parseLatLng(json['end_lat'], json['end_lon']),
+      storedDistanceKm: storedDist,
       completed: json['completed'] == true,
       reachedDestination: json['reached_destination'] == true,
     );
@@ -262,10 +292,19 @@ class RideHistoryEntry {
     return endTime!.difference(startTime!);
   }
 
+  /// Returns stored distance if available, otherwise calculates from coordinates
   double? get distanceKm {
+    // Prefer stored distance from database
+    if (storedDistanceKm != null && storedDistanceKm! > 0) {
+      return storedDistanceKm;
+    }
+    // Fallback: calculate straight-line distance from start to end
     if (startPoint == null || endPoint == null) return null;
     return const Distance().as(LengthUnit.Kilometer, startPoint!, endPoint!);
   }
+  
+  /// Whether distance is actual tracked distance or just straight-line estimate
+  bool get isActualDistance => storedDistanceKm != null && storedDistanceKm! > 0;
 
   double? get avgSpeedKmh {
     final duration = this.duration;
@@ -373,7 +412,7 @@ class _RideCard extends StatelessWidget {
             if (distance != null)
               _InfoRow(
                 label: 'Distance',
-                value: '${distance.toStringAsFixed(2)} km (straight-line)',
+                value: '${distance.toStringAsFixed(2)} km${ride.isActualDistance ? '' : ' (estimated)'}',
               ),
             if (speed != null)
               _InfoRow(

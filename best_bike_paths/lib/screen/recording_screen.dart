@@ -10,6 +10,8 @@ import '../services/sensor_service.dart';
 import '../services/navigation_service.dart';
 import '../services/weather_service.dart';
 import '../services/segment_coloring_service.dart';
+import '../services/local_cache_service.dart';
+import '../services/background_ride_service.dart';
 import 'manual_report_dialog.dart';
 import 'ride_summary_screen.dart';
 import 'verification_dialog.dart';
@@ -53,41 +55,54 @@ class RouteRecommendation {
 class AnomalyPoint {
   final LatLng location;
   final double weight;
-  final String? trustLevel; // verified_strong, verified, likely, reported, unverified
+  final String?
+  trustLevel; // verified_strong, verified, likely, reported, unverified
   final int? daysUntilExpiry;
   final int upvotes;
   final int downvotes;
 
   const AnomalyPoint({
-    required this.location, 
+    required this.location,
     required this.weight,
     this.trustLevel,
     this.daysUntilExpiry,
     this.upvotes = 0,
     this.downvotes = 0,
   });
-  
+
   /// Get opacity based on trust level
   double get opacity {
     switch (trustLevel) {
-      case 'verified_strong': return 1.0;
-      case 'verified': return 0.95;
-      case 'likely': return 0.85;
-      case 'reported': return 0.7;
-      case 'unverified': return 0.5;
-      default: return 0.8;
+      case 'verified_strong':
+        return 1.0;
+      case 'verified':
+        return 0.95;
+      case 'likely':
+        return 0.85;
+      case 'reported':
+        return 0.7;
+      case 'unverified':
+        return 0.5;
+      default:
+        return 0.8;
     }
   }
-  
+
   /// Get marker size multiplier based on trust level
   double get sizeMultiplier {
     switch (trustLevel) {
-      case 'verified_strong': return 1.2;
-      case 'verified': return 1.1;
-      case 'likely': return 1.0;
-      case 'reported': return 0.9;
-      case 'unverified': return 0.8;
-      default: return 1.0;
+      case 'verified_strong':
+        return 1.2;
+      case 'verified':
+        return 1.1;
+      case 'likely':
+        return 1.0;
+      case 'reported':
+        return 0.9;
+      case 'unverified':
+        return 0.8;
+      default:
+        return 1.0;
     }
   }
 }
@@ -128,17 +143,24 @@ class _RecordingScreenState extends State<RecordingScreen>
   final SensorService _sensorService = SensorService();
   final NavigationService _navService = NavigationService();
   final WeatherService _weatherService = WeatherService();
+  final LocalCacheService _cacheService = LocalCacheService.instance;
+  final BackgroundRideService _backgroundService = BackgroundRideService();
   final MapController _mapController = MapController();
   final TextEditingController _searchController = TextEditingController();
 
   Timer? _debounce;
   StreamSubscription<Position>? _positionSub;
+  StreamSubscription<SyncStatus>? _syncStatusSub;
+  StreamSubscription<int>? _pendingCountSub;
   LatLng _currentLocation = const LatLng(45.4642, 9.1900);
   LatLng? _startLocation;
   LatLng? _destinationPoint;
   double _currentSpeedMps = 0;
 
   bool _isRideActive = false;
+  bool _isOffline = false;
+  int _pendingReportCount = 0;
+  SyncStatus _syncStatus = SyncStatus.idle;
 
   List<Map<String, dynamic>> _searchResults = [];
   bool _showResults = false;
@@ -183,6 +205,7 @@ class _RecordingScreenState extends State<RecordingScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _initializeOfflineSupport();
     _initializeLocation();
     _loadPreferencesAndData();
     // Note: _fetchWeather() is now called inside _initializeLocation after GPS is ready
@@ -277,7 +300,24 @@ class _RecordingScreenState extends State<RecordingScreen>
     _sensorService.updateSpeed(_currentSpeedMps);
     if (_isRideActive) {
       _checkDestinationArrival(loc);
+      // Update background notification with current stats
+      _updateBackgroundNotification();
     }
+  }
+  
+  /// Update the background service notification with current ride stats
+  void _updateBackgroundNotification() {
+    if (!_backgroundService.isRunning || _rideStartTime == null) return;
+    
+    final duration = DateTime.now().difference(_rideStartTime!);
+    final distanceKm = _computeRideDistanceKm(_ridePath);
+    final speedKmh = _currentSpeedMps * 3.6; // m/s to km/h
+    
+    _backgroundService.updateNotification(
+      distanceKm: distanceKm,
+      duration: duration,
+      speedKmh: speedKmh,
+    );
   }
 
   void _checkDestinationArrival(LatLng location) {
@@ -517,6 +557,119 @@ class _RecordingScreenState extends State<RecordingScreen>
     }
   }
 
+  // ========== OFFLINE SUPPORT ==========
+
+  void _initializeOfflineSupport() {
+    // Listen to sync status changes
+    _syncStatusSub = _cacheService.syncStatusStream.listen((status) {
+      if (mounted) {
+        setState(() {
+          _syncStatus = status;
+          _isOffline = status == SyncStatus.offline;
+        });
+        
+        // Show snackbar for sync events
+        if (status == SyncStatus.success) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('✓ Offline reports synced successfully'),
+              backgroundColor: Colors.green,
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+      }
+    });
+
+    // Listen to pending report count
+    _pendingCountSub = _cacheService.pendingCountStream.listen((count) {
+      if (mounted) {
+        setState(() => _pendingReportCount = count);
+      }
+    });
+
+    // Set initial state
+    _isOffline = !_cacheService.isOnline;
+  }
+
+  /// Save report to local cache when offline
+  Future<void> _saveReportOffline(LatLng location, String category, bool isManual) async {
+    await _cacheService.savePendingReport(
+      location: location,
+      category: category,
+      isManual: isManual,
+      rideId: _activeRideId,
+    );
+    
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('$category saved offline. Will sync when online.'),
+          backgroundColor: Colors.orange,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  /// Build offline indicator widget
+  Widget _buildOfflineIndicator() {
+    if (!_isOffline && _pendingReportCount == 0) {
+      return const SizedBox.shrink();
+    }
+
+    return Positioned(
+      top: MediaQuery.of(context).padding.top + 60,
+      left: 8,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: _isOffline ? Colors.orange.shade800 : Colors.blue.shade700,
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.3),
+              blurRadius: 4,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              _isOffline ? Icons.cloud_off : Icons.cloud_upload,
+              color: Colors.white,
+              size: 16,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              _isOffline 
+                  ? 'Offline' 
+                  : '$_pendingReportCount pending',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            if (_syncStatus == SyncStatus.syncing) ...[
+              const SizedBox(width: 6),
+              const SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<void> _initializeLocation() async {
     final ready = await _ensureLocationReady();
     if (!ready) return;
@@ -531,7 +684,9 @@ class _RecordingScreenState extends State<RecordingScreen>
       // Start continuous location stream (GPS always on)
       _startLocationStream();
       // Fetch weather after we have real GPS coordinates
-      debugPrint('[WEATHER] Fetching weather for ${position.latitude}, ${position.longitude}');
+      debugPrint(
+        '[WEATHER] Fetching weather for ${position.latitude}, ${position.longitude}',
+      );
       _fetchWeather();
     }
   }
@@ -623,6 +778,167 @@ class _RecordingScreenState extends State<RecordingScreen>
         setState(() => _showResults = false);
       }
     });
+  }
+
+  /// Handle long-press on map to select destination
+  Future<void> _onMapLongPress(TapPosition tapPosition, LatLng point) async {
+    // First, get the address for the selected point (reverse geocoding)
+    String locationName = 'Selected Location';
+    try {
+      final response = await _navService.reverseGeocode(point.latitude, point.longitude);
+      if (response != null && response.isNotEmpty) {
+        locationName = response.split(',')[0];
+      }
+    } catch (e) {
+      debugPrint('[MAP] Reverse geocoding failed: $e');
+    }
+
+    // Show confirmation dialog
+    if (!mounted) return;
+    
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.location_on, color: Color(0xFF00FF00)),
+            SizedBox(width: 8),
+            Text(
+              'Set Destination?',
+              style: TextStyle(color: Colors.white),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Do you want to set this location as your destination?',
+              style: TextStyle(color: Colors.grey),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF2A2A2A),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.place, color: Colors.red, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      locationName,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w500,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text(
+              'Cancel',
+              style: TextStyle(color: Colors.grey),
+            ),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF00FF00),
+              foregroundColor: Colors.black,
+            ),
+            child: const Text('Confirm'),
+          ),
+        ],
+      ),
+    );
+
+    // If user cancelled, don't proceed
+    if (confirmed != true) return;
+
+    // User confirmed, proceed with setting destination
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Setting destination...'),
+          duration: Duration(seconds: 1),
+        ),
+      );
+    }
+
+    setState(() {
+      _showResults = false;
+      _loadingRoutes = true;
+      _routeError = null;
+    });
+
+    _searchController.text = locationName;
+    FocusScope.of(context).unfocus();
+
+    _destinationPoint = point;
+    if (_isRideActive) {
+      await _persistRideState();
+    }
+
+    final options = await _navService.getBikeRoutes(
+      _currentLocation,
+      point,
+    );
+
+    final withIssues = await _attachIssueCounts(options);
+    final bestIndex = _pickBestRouteIndex(withIssues);
+
+    if (mounted) {
+      setState(() {
+        _routeOptions = withIssues;
+        _selectedRouteIndex = bestIndex;
+        _routePoints = withIssues.isNotEmpty
+            ? withIssues[bestIndex].points
+            : [];
+        _hasRoute = withIssues.isNotEmpty;
+        _loadingRoutes = false;
+        _routeError = withIssues.isEmpty
+            ? 'No routes available. Try another destination.'
+            : null;
+        _autoSelectedRoute = withIssues.isNotEmpty;
+      });
+
+      // Compute colored segments for the selected route
+      if (_routePoints.isNotEmpty) {
+        _computeColoredSegments();
+      }
+
+      if (_routeOptions.isNotEmpty) {
+        _mapController.fitCamera(
+          CameraFit.bounds(
+            bounds: LatLngBounds.fromPoints([_currentLocation, point]),
+            padding: const EdgeInsets.all(50),
+          ),
+        );
+        _showRouteOptionsSheet();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Destination set! Auto-selected Route ${bestIndex + 1}.',
+            ),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _selectDestination(Map<String, dynamic> place) async {
@@ -769,7 +1085,9 @@ class _RecordingScreenState extends State<RecordingScreen>
       final rows =
           await Supabase.instance.client
                   .from('active_anomalies')
-                  .select('id,location,severity,category,verified,upvotes,downvotes,trust_level,days_until_expiry')
+                  .select(
+                    'id,location,severity,category,verified,upvotes,downvotes,trust_level,days_until_expiry',
+                  )
                   .order('created_at', ascending: false)
                   .limit(500)
               as List<dynamic>;
@@ -788,7 +1106,9 @@ class _RecordingScreenState extends State<RecordingScreen>
         final rows =
             await Supabase.instance.client
                     .from('anomalies')
-                    .select('id,location,severity,category,verified,upvotes,downvotes')
+                    .select(
+                      'id,location,severity,category,verified,upvotes,downvotes',
+                    )
                     .filter('expires_at', 'is', null) // Only non-expired
                     .order('created_at', ascending: false)
                     .limit(500)
@@ -833,7 +1153,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     if (location == null) return null;
     final severity = row['severity']?.toString();
     return AnomalyPoint(
-      location: location, 
+      location: location,
       weight: _severityWeight(severity),
       trustLevel: row['trust_level']?.toString(),
       daysUntilExpiry: row['days_until_expiry'] as int?,
@@ -1285,6 +1605,10 @@ class _RecordingScreenState extends State<RecordingScreen>
     _sensorService.setTestMode(_testMode);
 
     _startLocationStream();
+    
+    // Start background service to keep tracking when screen is off
+    await _backgroundService.startBackgroundTracking();
+    debugPrint('[RIDE] Background tracking started');
   }
 
   Future<void> _stopRide() async {
@@ -1293,6 +1617,7 @@ class _RecordingScreenState extends State<RecordingScreen>
 
     // Save ride ID before clearing state
     final rideId = _activeRideId;
+    final ridePath = List<LatLng>.from(_ridePath); // Copy path before clearing
 
     setState(() {
       _isRideActive = false;
@@ -1314,24 +1639,62 @@ class _RecordingScreenState extends State<RecordingScreen>
       rideDuration = Duration.zero;
     }
 
+    // Calculate distance from recorded path
+    final distanceKm = _computeRideDistanceKm(ridePath);
+    debugPrint('[RIDE] Calculated distance: ${distanceKm.toStringAsFixed(2)} km from ${ridePath.length} points');
+
     if (rideId != null) {
       try {
-        // Only update end_time - the rides table may not have end_lat/end_lon columns
+        final userId = Supabase.instance.client.auth.currentUser?.id;
+        
+        // Update ride with end time and distance
         await Supabase.instance.client
             .from('rides')
-            .update({'end_time': DateTime.now().toIso8601String()})
+            .update({
+              'end_time': DateTime.now().toIso8601String(),
+              'distance_km': distanceKm,
+              'end_lat': _currentLocation.latitude,
+              'end_lon': _currentLocation.longitude,
+            })
             .eq('id', rideId);
-        debugPrint('[RIDE] Stopped ride: $rideId');
+        debugPrint('[RIDE] Stopped ride: $rideId with distance: $distanceKm km');
+        
+        // Update user's total distance in profiles table
+        if (userId != null && distanceKm > 0) {
+          await _updateUserTotalDistance(userId, distanceKm);
+        }
       } catch (e) {
         debugPrint('[RIDE] Failed to update ride on stop: $e');
+        // Try updating without end_lat/end_lon if columns don't exist
+        try {
+          await Supabase.instance.client
+              .from('rides')
+              .update({
+                'end_time': DateTime.now().toIso8601String(),
+                'distance_km': distanceKm,
+              })
+              .eq('id', rideId);
+          debugPrint('[RIDE] Updated ride without location columns');
+          
+          final userId = Supabase.instance.client.auth.currentUser?.id;
+          if (userId != null && distanceKm > 0) {
+            await _updateUserTotalDistance(userId, distanceKm);
+          }
+        } catch (e2) {
+          debugPrint('[RIDE] Fallback update also failed: $e2');
+        }
       }
     }
+
+    // Stop background service
+    await _backgroundService.stopBackgroundTracking();
+    debugPrint('[RIDE] Background tracking stopped');
 
     if (mounted) {
       Navigator.of(context).push(
         MaterialPageRoute(
           builder: (_) => RideSummaryScreen(
-            routePoints: _ridePath.isNotEmpty ? _ridePath : _routePoints,
+            routePoints: ridePath.isNotEmpty ? ridePath : _routePoints,
             reports: _sessionReports,
             startPoint: _startLocation ?? _currentLocation,
             endPoint: _currentLocation,
@@ -1391,14 +1754,80 @@ class _RecordingScreenState extends State<RecordingScreen>
       );
     });
 
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('$category Recorded! Added to Summary.'),
-          backgroundColor: isManual ? Colors.orange : Colors.red,
-          duration: const Duration(milliseconds: 500),
-        ),
-      );
+    // If offline, save to local cache for later sync
+    if (_isOffline) {
+      await _saveReportOffline(potholeLoc, category, isManual);
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('$category Recorded! Added to Summary.'),
+            backgroundColor: isManual ? Colors.orange : Colors.red,
+            duration: const Duration(milliseconds: 500),
+          ),
+        );
+      }
+    }
+  }
+
+  /// Calculate total distance in km from a list of GPS points
+  double _computeRideDistanceKm(List<LatLng> points) {
+    if (points.length < 2) return 0;
+    const dist = Distance();
+    double km = 0;
+    for (int i = 0; i < points.length - 1; i++) {
+      km += dist.as(LengthUnit.Kilometer, points[i], points[i + 1]);
+    }
+    return km;
+  }
+
+  /// Update user's total distance in profiles table
+  Future<void> _updateUserTotalDistance(String userId, double addedDistanceKm) async {
+    try {
+      // First, get current total distance
+      final profile = await Supabase.instance.client
+          .from('profiles')
+          .select('total_distance_km')
+          .eq('id', userId)
+          .maybeSingle();
+
+      final currentDistance = (profile?['total_distance_km'] as num?)?.toDouble() ?? 0.0;
+      final newTotalDistance = currentDistance + addedDistanceKm;
+
+      // Update the profile with new total
+      await Supabase.instance.client
+          .from('profiles')
+          .upsert({
+            'id': userId,
+            'total_distance_km': newTotalDistance,
+          });
+
+      debugPrint('[RIDE] Updated user total distance: $currentDistance + $addedDistanceKm = $newTotalDistance km');
+    } catch (e) {
+      debugPrint('[RIDE] Failed to update user total distance: $e');
+      
+      // Try user_stats table as fallback
+      try {
+        final stats = await Supabase.instance.client
+            .from('user_stats')
+            .select('total_distance_km')
+            .eq('user_id', userId)
+            .maybeSingle();
+
+        final currentDistance = (stats?['total_distance_km'] as num?)?.toDouble() ?? 0.0;
+        final newTotalDistance = currentDistance + addedDistanceKm;
+
+        await Supabase.instance.client
+            .from('user_stats')
+            .upsert({
+              'user_id': userId,
+              'total_distance_km': newTotalDistance,
+            });
+
+        debugPrint('[RIDE] Updated user_stats total distance: $newTotalDistance km');
+      } catch (e2) {
+        debugPrint('[RIDE] Fallback user_stats update also failed: $e2');
+      }
     }
   }
 
@@ -1427,11 +1856,15 @@ class _RecordingScreenState extends State<RecordingScreen>
       _currentLocation.latitude,
       _currentLocation.longitude,
     );
-    debugPrint('[WEATHER] Weather result: ${weather?.temperature}°C, ${weather?.condition}');
+    debugPrint(
+      '[WEATHER] Weather result: ${weather?.temperature}°C, ${weather?.condition}',
+    );
     if (mounted && weather != null) {
       setState(() {
         _weatherData = weather;
-        debugPrint('[WEATHER] Weather data set: ${_weatherData?.temperature}°C');
+        debugPrint(
+          '[WEATHER] Weather data set: ${_weatherData?.temperature}°C',
+        );
         // Show weather alert banner if there are warnings or dangers
         _showWeatherAlerts = weather.alerts.any(
           (a) =>
@@ -1507,13 +1940,17 @@ class _RecordingScreenState extends State<RecordingScreen>
 
   /// Build a compact weather info chip that's always visible
   Widget _buildWeatherInfoChip() {
-    debugPrint('[WEATHER] Building weather chip, _weatherData is ${_weatherData != null ? "available" : "null"}');
+    debugPrint(
+      '[WEATHER] Building weather chip, _weatherData is ${_weatherData != null ? "available" : "null"}',
+    );
     if (_weatherData == null) return const SizedBox.shrink();
 
     final weather = _weatherData!;
     final icon = _getWeatherConditionIcon(weather.condition);
     final isSafe = weather.isSafeForCycling;
-    debugPrint('[WEATHER] Chip: ${weather.temperature}°C, icon: $icon, safe: $isSafe');
+    debugPrint(
+      '[WEATHER] Chip: ${weather.temperature}°C, icon: $icon, safe: $isSafe',
+    );
 
     return GestureDetector(
       onTap: () {
@@ -1545,14 +1982,28 @@ class _RecordingScreenState extends State<RecordingScreen>
                   ),
                 ),
                 const SizedBox(height: 16),
-                _buildWeatherDetailRow('🌡️', 'Temperature', '${weather.temperature.toStringAsFixed(1)}°C'),
-                _buildWeatherDetailRow('💨', 'Wind', '${weather.windSpeed.toStringAsFixed(1)} m/s'),
-                _buildWeatherDetailRow('💧', 'Humidity', '${weather.humidity.toStringAsFixed(0)}%'),
+                _buildWeatherDetailRow(
+                  '🌡️',
+                  'Temperature',
+                  '${weather.temperature.toStringAsFixed(1)}°C',
+                ),
+                _buildWeatherDetailRow(
+                  '💨',
+                  'Wind',
+                  '${weather.windSpeed.toStringAsFixed(1)} m/s',
+                ),
+                _buildWeatherDetailRow(
+                  '💧',
+                  'Humidity',
+                  '${weather.humidity.toStringAsFixed(0)}%',
+                ),
                 const SizedBox(height: 16),
                 Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: isSafe ? Colors.green.withOpacity(0.2) : Colors.red.withOpacity(0.2),
+                    color: isSafe
+                        ? Colors.green.withOpacity(0.2)
+                        : Colors.red.withOpacity(0.2),
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(
                       color: isSafe ? Colors.green : Colors.red,
@@ -1569,7 +2020,9 @@ class _RecordingScreenState extends State<RecordingScreen>
                         child: Text(
                           weather.cyclingAdvice,
                           style: TextStyle(
-                            color: isSafe ? Colors.green.shade300 : Colors.red.shade300,
+                            color: isSafe
+                                ? Colors.green.shade300
+                                : Colors.red.shade300,
                             fontSize: 13,
                           ),
                         ),
@@ -1582,7 +2035,10 @@ class _RecordingScreenState extends State<RecordingScreen>
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(ctx),
-                child: const Text('OK', style: TextStyle(color: Color(0xFF00FF00))),
+                child: const Text(
+                  'OK',
+                  style: TextStyle(color: Color(0xFF00FF00)),
+                ),
               ),
             ],
           ),
@@ -1760,6 +2216,8 @@ class _RecordingScreenState extends State<RecordingScreen>
     _debounce?.cancel();
     _sensorService.stopListening();
     _positionSub?.cancel();
+    _syncStatusSub?.cancel();
+    _pendingCountSub?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _searchController.dispose();
     super.dispose();
@@ -1783,6 +2241,7 @@ class _RecordingScreenState extends State<RecordingScreen>
               options: MapOptions(
                 initialCenter: _currentLocation,
                 initialZoom: 15.0,
+                onLongPress: _onMapLongPress,
               ),
               children: [
                 TileLayer(
@@ -1862,7 +2321,10 @@ class _RecordingScreenState extends State<RecordingScreen>
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 2,
+                              ),
                               decoration: BoxDecoration(
                                 color: Colors.green,
                                 borderRadius: BorderRadius.circular(4),
@@ -1894,7 +2356,10 @@ class _RecordingScreenState extends State<RecordingScreen>
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 2,
+                              ),
                               decoration: BoxDecoration(
                                 color: Colors.red,
                                 borderRadius: BorderRadius.circular(4),
@@ -1908,11 +2373,7 @@ class _RecordingScreenState extends State<RecordingScreen>
                                 ),
                               ),
                             ),
-                            const Icon(
-                              Icons.flag,
-                              color: Colors.red,
-                              size: 30,
-                            ),
+                            const Icon(Icons.flag, color: Colors.red, size: 30),
                           ],
                         ),
                       ),
@@ -1952,10 +2413,13 @@ class _RecordingScreenState extends State<RecordingScreen>
                       final category =
                           anomaly['category']?.toString() ?? 'Unknown';
                       final verified = anomaly['verified'] == true;
-                      final trustLevel = anomaly['trust_level']?.toString() ?? 'unverified';
-                      final upvotes = (anomaly['upvotes'] as num?)?.toInt() ?? 0;
-                      final downvotes = (anomaly['downvotes'] as num?)?.toInt() ?? 0;
-                      
+                      final trustLevel =
+                          anomaly['trust_level']?.toString() ?? 'unverified';
+                      final upvotes =
+                          (anomaly['upvotes'] as num?)?.toInt() ?? 0;
+                      final downvotes =
+                          (anomaly['downvotes'] as num?)?.toInt() ?? 0;
+
                       // Calculate opacity and size based on trust level
                       double opacity;
                       double size;
@@ -1982,12 +2446,12 @@ class _RecordingScreenState extends State<RecordingScreen>
                           size = 24;
                           break;
                       }
-                      
+
                       // Reduce opacity further if heavily downvoted
                       if (downvotes > upvotes && downvotes >= 3) {
                         opacity = opacity * 0.6;
                       }
-                      
+
                       return Marker(
                         point: loc,
                         width: size,
@@ -2001,20 +2465,24 @@ class _RecordingScreenState extends State<RecordingScreen>
                                 color: verified
                                     ? Colors.green.withOpacity(0.9)
                                     : trustLevel == 'likely'
-                                        ? Colors.orange.withOpacity(0.9)
-                                        : Colors.red.withOpacity(0.9),
+                                    ? Colors.orange.withOpacity(0.9)
+                                    : Colors.red.withOpacity(0.9),
                                 shape: BoxShape.circle,
                                 border: Border.all(
-                                  color: Colors.white, 
-                                  width: trustLevel == 'verified_strong' ? 3 : 2,
+                                  color: Colors.white,
+                                  width: trustLevel == 'verified_strong'
+                                      ? 3
+                                      : 2,
                                 ),
-                                boxShadow: verified ? [
-                                  BoxShadow(
-                                    color: Colors.green.withOpacity(0.5),
-                                    blurRadius: 6,
-                                    spreadRadius: 1,
-                                  )
-                                ] : null,
+                                boxShadow: verified
+                                    ? [
+                                        BoxShadow(
+                                          color: Colors.green.withOpacity(0.5),
+                                          blurRadius: 6,
+                                          spreadRadius: 1,
+                                        ),
+                                      ]
+                                    : null,
                               ),
                               child: Icon(
                                 _getAnomalyIcon(category),
@@ -2072,6 +2540,9 @@ class _RecordingScreenState extends State<RecordingScreen>
                   ),
                 ),
               ),
+
+            // Offline indicator
+            _buildOfflineIndicator(),
 
             if (!_isRideActive)
               Positioned(
@@ -2288,10 +2759,7 @@ class _RecordingScreenState extends State<RecordingScreen>
                 mini: true,
                 backgroundColor: Colors.white,
                 onPressed: _locateMe,
-                child: const Icon(
-                  Icons.my_location,
-                  color: Colors.blue,
-                ),
+                child: const Icon(Icons.my_location, color: Colors.blue),
               ),
             ),
 
@@ -2329,11 +2797,7 @@ class _RecordingScreenState extends State<RecordingScreen>
 
             // Weather info chip (always visible when weather data available)
             if (_weatherData != null)
-              Positioned(
-                top: 16,
-                right: 60,
-                child: _buildWeatherInfoChip(),
-              ),
+              Positioned(top: 16, right: 60, child: _buildWeatherInfoChip()),
 
             // Guest mode info banner
             if (widget.guestMode)

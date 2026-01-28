@@ -41,7 +41,7 @@ class _VerificationDialogState extends State<VerificationDialog> {
     final details = await _verificationService.getAnomalyDetails(
       widget.anomalyId,
     );
-    
+
     // Check if current user is the reporter
     final isReporter = await _verificationService.isReporter(widget.anomalyId);
 
@@ -72,13 +72,17 @@ class _VerificationDialogState extends State<VerificationDialog> {
             id: _details!.id,
             category: _details!.category,
             severity: _details!.severity,
-            verified: result.isVerified || 
-                (result.newUpvotes >= 3 && result.newUpvotes > result.newDownvotes),
+            verified:
+                result.isVerified ||
+                (result.newUpvotes >= 3 &&
+                    result.newUpvotes > result.newDownvotes),
             upvotes: result.newUpvotes,
             downvotes: result.newDownvotes,
             createdAt: _details!.createdAt,
             description: _details!.description,
-            userVote: result.action == 'removed' ? null : result.userVote ?? voteType,
+            userVote: result.action == 'removed'
+                ? null
+                : result.userVote ?? voteType,
             totalVoters: result.newUpvotes + result.newDownvotes,
           );
         }
@@ -89,7 +93,9 @@ class _VerificationDialogState extends State<VerificationDialog> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(result.message),
-            backgroundColor: result.success ? Colors.green.shade700 : Colors.red.shade700,
+            backgroundColor: result.success
+                ? Colors.green.shade700
+                : Colors.red.shade700,
             duration: const Duration(seconds: 2),
           ),
         );
@@ -115,7 +121,9 @@ class _VerificationDialogState extends State<VerificationDialog> {
             id: _details!.id,
             category: _details!.category,
             severity: _details!.severity,
-            verified: result.newUpvotes >= 3 && result.newUpvotes > result.newDownvotes,
+            verified:
+                result.newUpvotes >= 3 &&
+                result.newUpvotes > result.newDownvotes,
             upvotes: result.newUpvotes,
             downvotes: result.newDownvotes,
             createdAt: _details!.createdAt,
@@ -130,7 +138,9 @@ class _VerificationDialogState extends State<VerificationDialog> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(result.message),
-            backgroundColor: result.success ? Colors.green.shade700 : Colors.red.shade700,
+            backgroundColor: result.success
+                ? Colors.green.shade700
+                : Colors.red.shade700,
             duration: const Duration(seconds: 2),
           ),
         );
@@ -145,7 +155,10 @@ class _VerificationDialogState extends State<VerificationDialog> {
       _message = null;
     });
 
-    final result = await _verificationService.updateReporterStatus(widget.anomalyId, status);
+    final result = await _verificationService.updateReporterStatus(
+      widget.anomalyId,
+      status,
+    );
 
     if (mounted) {
       setState(() {
@@ -156,14 +169,18 @@ class _VerificationDialogState extends State<VerificationDialog> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(result.message),
-          backgroundColor: result.success ? Colors.green.shade700 : Colors.red.shade700,
+          backgroundColor: result.success
+              ? Colors.green.shade700
+              : Colors.red.shade700,
           duration: const Duration(seconds: 2),
         ),
       );
 
       // Close dialog if resolved
       if (result.success && status == 'resolved') {
-        Navigator.of(context).pop(true); // Return true to indicate anomaly was resolved
+        Navigator.of(
+          context,
+        ).pop(true); // Return true to indicate anomaly was resolved
       }
     }
   }
@@ -309,7 +326,9 @@ class _VerificationDialogState extends State<VerificationDialog> {
                   children: [
                     Expanded(
                       child: ElevatedButton.icon(
-                        onPressed: _voting ? null : () => _updateReporterStatus('still_there'),
+                        onPressed: _voting
+                            ? null
+                            : () => _updateReporterStatus('still_there'),
                         icon: const Icon(Icons.warning_amber),
                         label: const Text('STILL THERE'),
                         style: ElevatedButton.styleFrom(
@@ -322,7 +341,9 @@ class _VerificationDialogState extends State<VerificationDialog> {
                     const SizedBox(width: 12),
                     Expanded(
                       child: ElevatedButton.icon(
-                        onPressed: _voting ? null : () => _updateReporterStatus('resolved'),
+                        onPressed: _voting
+                            ? null
+                            : () => _updateReporterStatus('resolved'),
                         icon: const Icon(Icons.check_circle),
                         label: const Text('RESOLVED'),
                         style: ElevatedButton.styleFrom(
@@ -337,7 +358,7 @@ class _VerificationDialogState extends State<VerificationDialog> {
               ] else ...[
                 // OTHER USERS UI: Can vote or remove vote
                 Text(
-                  _details!.userVote != null 
+                  _details!.userVote != null
                       ? 'You voted. Tap again to remove your vote.'
                       : 'Is this hazard still present?',
                   style: const TextStyle(color: Colors.white, fontSize: 14),
@@ -365,7 +386,9 @@ class _VerificationDialogState extends State<VerificationDialog> {
                     children: [
                       Expanded(
                         child: ElevatedButton.icon(
-                          onPressed: _voting ? null : () => _vote(VoteType.upvote),
+                          onPressed: _voting
+                              ? null
+                              : () => _vote(VoteType.upvote),
                           icon: const Icon(Icons.check),
                           label: const Text('YES, IT\'S THERE'),
                           style: ElevatedButton.styleFrom(
@@ -378,7 +401,9 @@ class _VerificationDialogState extends State<VerificationDialog> {
                       const SizedBox(width: 12),
                       Expanded(
                         child: ElevatedButton.icon(
-                          onPressed: _voting ? null : () => _vote(VoteType.downvote),
+                          onPressed: _voting
+                              ? null
+                              : () => _vote(VoteType.downvote),
                           icon: const Icon(Icons.close),
                           label: const Text('NO, IT\'S FIXED'),
                           style: ElevatedButton.styleFrom(

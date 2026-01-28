@@ -26,28 +26,52 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
     RideHistoryEntry? ride;
     List<AnomalyEntry> anomalies = [];
 
+    // Try multiple query strategies to handle missing columns
     try {
+      // Try to fetch with end coordinates and distance_km
       final row = await client
           .from('rides')
           .select(
-            'id,start_time,end_time,start_lat,start_lon,end_lat,end_lon,completed,reached_destination',
+            'id,start_time,end_time,start_lat,start_lon,end_lat,end_lon,distance_km',
           )
           .eq('id', widget.rideId)
           .maybeSingle();
       if (row != null) {
+        debugPrint('[RIDE_DETAIL] Fetched with end coords and distance: $row');
         ride = RideHistoryEntry.fromJson(row);
       }
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[RIDE_DETAIL] Full query failed: $e');
       try {
+        // Fallback without distance_km
         final row = await client
             .from('rides')
-            .select('id,start_time,end_time,start_lat,start_lon')
+            .select(
+              'id,start_time,end_time,start_lat,start_lon,end_lat,end_lon',
+            )
             .eq('id', widget.rideId)
             .maybeSingle();
         if (row != null) {
+          debugPrint('[RIDE_DETAIL] Fetched without distance_km: $row');
           ride = RideHistoryEntry.fromJson(row);
         }
-      } catch (_) {}
+      } catch (e2) {
+        debugPrint('[RIDE_DETAIL] Query without distance_km failed: $e2');
+        try {
+          // Fallback without end coordinates
+          final row = await client
+              .from('rides')
+              .select('id,start_time,end_time,start_lat,start_lon')
+              .eq('id', widget.rideId)
+              .maybeSingle();
+          if (row != null) {
+            debugPrint('[RIDE_DETAIL] Fetched without end coords: $row');
+            ride = RideHistoryEntry.fromJson(row);
+          }
+        } catch (e3) {
+          debugPrint('[RIDE_DETAIL] Minimal query also failed: $e3');
+        }
+      }
     }
 
     try {
@@ -125,7 +149,7 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
                   _InfoRow(
                     label: 'Distance',
                     value: ride.distanceKm != null
-                        ? '${ride.distanceKm!.toStringAsFixed(2)} km (straight-line)'
+                        ? '${ride.distanceKm!.toStringAsFixed(2)} km${ride.isActualDistance ? '' : ' (estimated)'}'
                         : '-',
                   ),
                   _InfoRow(
@@ -182,6 +206,7 @@ class RideHistoryEntry {
   final DateTime? endTime;
   final LatLng? startPoint;
   final LatLng? endPoint;
+  final double? storedDistanceKm;  // Distance stored in database
   final bool? completed;
   final bool? reachedDestination;
 
@@ -191,17 +216,31 @@ class RideHistoryEntry {
     required this.endTime,
     required this.startPoint,
     required this.endPoint,
+    this.storedDistanceKm,
     required this.completed,
     required this.reachedDestination,
   });
 
   factory RideHistoryEntry.fromJson(Map<String, dynamic> json) {
+    // Parse stored distance
+    double? storedDist;
+    if (json['distance_km'] != null) {
+      storedDist = double.tryParse(json['distance_km'].toString());
+    }
+    
+    final startPoint = _parseLatLng(json['start_lat'], json['start_lon']);
+    final endPoint = _parseLatLng(json['end_lat'], json['end_lon']);
+    
+    debugPrint('[RIDE_DETAIL] Parsing ride: id=${json['id']}, start_lat=${json['start_lat']}, start_lon=${json['start_lon']}, end_lat=${json['end_lat']}, end_lon=${json['end_lon']}, distance_km=${json['distance_km']}');
+    debugPrint('[RIDE_DETAIL] Parsed points: start=$startPoint, end=$endPoint, storedDist=$storedDist');
+    
     return RideHistoryEntry(
       id: json['id']?.toString() ?? '-',
       startTime: _parseDate(json['start_time']),
       endTime: _parseDate(json['end_time']),
-      startPoint: _parseLatLng(json['start_lat'], json['start_lon']),
-      endPoint: _parseLatLng(json['end_lat'], json['end_lon']),
+      startPoint: startPoint,
+      endPoint: endPoint,
+      storedDistanceKm: storedDist,
       completed: json['completed'] == true,
       reachedDestination: json['reached_destination'] == true,
     );
@@ -226,10 +265,25 @@ class RideHistoryEntry {
     return endTime!.difference(startTime!);
   }
 
+  /// Returns stored distance if available, otherwise calculates from coordinates
   double? get distanceKm {
-    if (startPoint == null || endPoint == null) return null;
-    return const Distance().as(LengthUnit.Kilometer, startPoint!, endPoint!);
+    // Prefer stored distance from database (only if > 0)
+    if (storedDistanceKm != null && storedDistanceKm! > 0) {
+      debugPrint('[RIDE_DETAIL] Using stored distance: $storedDistanceKm km');
+      return storedDistanceKm;
+    }
+    // Fallback: calculate straight-line distance from start to end
+    if (startPoint == null || endPoint == null) {
+      debugPrint('[RIDE_DETAIL] Cannot calculate distance: start=$startPoint, end=$endPoint');
+      return null;
+    }
+    final calculatedDist = const Distance().as(LengthUnit.Kilometer, startPoint!, endPoint!);
+    debugPrint('[RIDE_DETAIL] Calculated distance from coords: $calculatedDist km');
+    return calculatedDist;
   }
+  
+  /// Whether distance is actual tracked distance or just straight-line estimate
+  bool get isActualDistance => storedDistanceKm != null && storedDistanceKm! > 0;
 
   double? get avgSpeedKmh {
     final duration = this.duration;

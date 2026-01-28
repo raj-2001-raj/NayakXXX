@@ -49,6 +49,9 @@ dependencies:
   google_fonts: ^7.0.0
   http: ^1.6.0
   shared_preferences: ^2.2.3
+  connectivity_plus: ^6.0.3
+  flutter_foreground_task: ^8.0.0
+  wakelock_plus: ^1.2.8
 
 dev_dependencies:
   flutter_test:

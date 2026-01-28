@@ -432,9 +432,24 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
             ),
           ),
           if (!report.isVerified) ...[
-            const CircleAvatar(
-              backgroundColor: Colors.red,
-              child: Icon(Icons.close, color: Colors.white),
+            // Not verified - X removes it, check marks it verified
+            GestureDetector(
+              onTap: () {
+                // REMOVE the report completely when X is clicked
+                setState(() {
+                  _autoReports.remove(report);
+                });
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Detection removed - will not be saved'),
+                    duration: Duration(seconds: 2),
+                  ),
+                );
+              },
+              child: const CircleAvatar(
+                backgroundColor: Colors.red,
+                child: Icon(Icons.close, color: Colors.white),
+              ),
             ),
             const SizedBox(width: 10),
             GestureDetector(
@@ -445,8 +460,20 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
               ),
             ),
           ] else ...[
+            // Verified - X removes it, check stays green
             GestureDetector(
-              onTap: () => setState(() => report.isVerified = false),
+              onTap: () {
+                // REMOVE the report completely when X is clicked
+                setState(() {
+                  _autoReports.remove(report);
+                });
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Detection removed - will not be saved'),
+                    duration: Duration(seconds: 2),
+                  ),
+                );
+              },
               child: const CircleAvatar(
                 backgroundColor: Colors.grey,
                 child: Icon(Icons.close, color: Colors.black),
@@ -488,12 +515,31 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
                   ),
                 ),
                 const Text(
-                  'Manual Report (auto-saved)',
+                  'Manual Report',
                   style: TextStyle(color: Colors.grey, fontSize: 12),
                 ),
               ],
             ),
           ),
+          // X button to remove manual report
+          GestureDetector(
+            onTap: () {
+              setState(() {
+                _manualReports.remove(report);
+              });
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Manual report removed - will not be saved'),
+                  duration: Duration(seconds: 2),
+                ),
+              );
+            },
+            child: const CircleAvatar(
+              backgroundColor: Colors.grey,
+              child: Icon(Icons.close, color: Colors.black),
+            ),
+          ),
+          const SizedBox(width: 10),
           const CircleAvatar(
             backgroundColor: Color(0xFF00FF00),
             child: Icon(Icons.check, color: Colors.black),

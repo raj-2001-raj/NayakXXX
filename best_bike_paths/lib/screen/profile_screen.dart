@@ -1,3 +1,4 @@
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -77,6 +78,79 @@ class _ProfileScreenState extends State<ProfileScreen> {
           totalDistanceKm ??= _toDouble(stats['total_distance_km']);
         }
       } catch (_) {}
+    }
+
+    // FALLBACK: Calculate from rides.distance_km
+    if (totalDistanceKm == null || totalDistanceKm == 0) {
+      try {
+        final ridesWithDistance = await client
+            .from('rides')
+            .select('distance_km')
+            .eq('user_id', user.id) as List<dynamic>;
+        
+        double sumDistance = 0;
+        for (final ride in ridesWithDistance) {
+          final dist = _toDouble(ride['distance_km']);
+          if (dist != null && dist > 0) {
+            sumDistance += dist;
+          }
+        }
+        if (sumDistance > 0) {
+          totalDistanceKm = sumDistance;
+          debugPrint('[PROFILE] Calculated distance from rides.distance_km: $sumDistance km');
+        }
+      } catch (e) {
+        debugPrint('[PROFILE] Failed to get rides.distance_km: $e');
+      }
+    }
+    
+    // FALLBACK: Calculate from start/end coordinates
+    if (totalDistanceKm == null || totalDistanceKm == 0) {
+      try {
+        // First try with end_lat/end_lon
+        final ridesWithCoords = await client
+            .from('rides')
+            .select('start_lat,start_lon,end_lat,end_lon')
+            .eq('user_id', user.id) as List<dynamic>;
+        
+        debugPrint('[PROFILE] Fetched ${ridesWithCoords.length} rides with coordinates');
+        
+        double sumDistance = 0;
+        for (final ride in ridesWithCoords) {
+          final startLat = _toDouble(ride['start_lat']);
+          final startLon = _toDouble(ride['start_lon']);
+          final endLat = _toDouble(ride['end_lat']);
+          final endLon = _toDouble(ride['end_lon']);
+          
+          debugPrint('[PROFILE] Ride coords: start=($startLat, $startLon), end=($endLat, $endLon)');
+          
+          if (startLat != null && startLon != null && endLat != null && endLon != null) {
+            final dist = _calculateDistanceKm(startLat, startLon, endLat, endLon);
+            debugPrint('[PROFILE] Calculated dist for ride: $dist km');
+            if (dist > 0.01) {
+              sumDistance += dist;
+            }
+          }
+        }
+        if (sumDistance > 0) {
+          totalDistanceKm = sumDistance;
+          debugPrint('[PROFILE] Total calculated distance from coordinates: $sumDistance km');
+        } else {
+          debugPrint('[PROFILE] No valid coordinates found for distance calculation');
+        }
+      } catch (e) {
+        debugPrint('[PROFILE] Failed to calculate from coordinates: $e');
+        // Try with just start coordinates if end columns don't exist
+        try {
+          final ridesBasic = await client
+              .from('rides')
+              .select('start_lat,start_lon')
+              .eq('user_id', user.id) as List<dynamic>;
+          debugPrint('[PROFILE] Rides with start coords only: ${ridesBasic.length}');
+        } catch (e2) {
+          debugPrint('[PROFILE] Even basic coordinate fetch failed: $e2');
+        }
+      }
     }
 
     // Get actual ride count from rides table
@@ -295,6 +369,23 @@ class _ProfileScreenState extends State<ProfileScreen> {
     if (value is num) return value.toDouble();
     return double.tryParse(value.toString());
   }
+
+  /// Calculate distance between two coordinates using Haversine formula
+  double _calculateDistanceKm(
+      double lat1, double lon1, double lat2, double lon2) {
+    const double earthRadius = 6371; // Earth's radius in kilometers
+    final dLat = _toRadians(lat2 - lat1);
+    final dLon = _toRadians(lon2 - lon1);
+    final a = sin(dLat / 2) * sin(dLat / 2) +
+        cos(_toRadians(lat1)) *
+            cos(_toRadians(lat2)) *
+            sin(dLon / 2) *
+            sin(dLon / 2);
+    final c = 2 * atan2(sqrt(a), sqrt(1 - a));
+    return earthRadius * c;
+  }
+
+  double _toRadians(double degrees) => degrees * pi / 180;
 }
 
 class ProfileDetails {
@@ -391,11 +482,16 @@ class _InfoTile extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             Text(label, style: const TextStyle(color: Colors.grey)),
-            Text(
-              value,
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
+            const SizedBox(width: 16),
+            Flexible(
+              child: Text(
+                value,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.end,
               ),
             ),
           ],

@@ -3,6 +3,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'core/constants.dart';
 import 'screen/auth_screen.dart';
 import 'screen/dashboard_screen.dart';
+import 'services/local_cache_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -11,6 +12,9 @@ Future<void> main() async {
     url: SupabaseConstants.url,
     anonKey: SupabaseConstants.anonKey,
   );
+
+  // Initialize local cache service for offline support
+  await LocalCacheService.instance.initialize();
 
   runApp(const BBPApp());
 }

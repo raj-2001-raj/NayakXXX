@@ -135,7 +135,7 @@ class VerificationService {
       );
     } catch (e) {
       debugPrint('[VOTE] Error: $e');
-      
+
       // Parse error message for user-friendly display
       final errorMsg = e.toString();
       if (errorMsg.contains('cannot vote on your own')) {
@@ -150,7 +150,7 @@ class VerificationService {
           message: 'Remove your current vote first',
         );
       }
-      
+
       return const VerificationResult(
         success: false,
         message: 'Failed to vote. Please try again.',
@@ -159,7 +159,10 @@ class VerificationService {
   }
 
   /// Reporter updates their anomaly status (still there / resolved)
-  Future<VerificationResult> updateReporterStatus(String anomalyId, String status) async {
+  Future<VerificationResult> updateReporterStatus(
+    String anomalyId,
+    String status,
+  ) async {
     final userId = _supabase.auth.currentUser?.id;
     if (userId == null) {
       return const VerificationResult(
@@ -314,8 +317,9 @@ class AnomalyDetails {
           DateTime.now(),
       description: json['description']?.toString(),
       userVote: userVote,
-      totalVoters: ((json['upvotes'] as num?)?.toInt() ?? 0) + 
-                   ((json['downvotes'] as num?)?.toInt() ?? 0),
+      totalVoters:
+          ((json['upvotes'] as num?)?.toInt() ?? 0) +
+          ((json['downvotes'] as num?)?.toInt() ?? 0),
     );
   }
 

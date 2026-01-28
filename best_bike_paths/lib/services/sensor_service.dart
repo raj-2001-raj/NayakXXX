@@ -6,24 +6,24 @@ import 'package:sensors_plus/sensors_plus.dart';
 
 class SensorService {
   static const double _gravity = 9.8;
-  static const double _zImpactThresholdG = 2.0;
+  // LOWERED: Detection thresholds for better pothole detection
+  static const double _zImpactThresholdG = 1.2;  // Was 2.0 - now detects smaller bumps
   static const int _windowSize = 50;
-  static const double _stdMultiplier = 3.0;
-  static const double _jerkThresholdGPerSec = 6.0;
-  static const double _highPassCutoffHz = 0.6;
-  static const double _lowPassCutoffHz = 12.0;
+  static const double _stdMultiplier = 2.5;  // Was 3.0 - more sensitive
+  static const double _jerkThresholdGPerSec = 3.5;  // Was 6.0 - detects gradual bumps too
+  static const double _highPassCutoffHz = 0.5;  // Slightly lower for better low-freq detection
+  static const double _lowPassCutoffHz = 15.0;  // Slightly higher for sharper impacts
   static const double _gyroCorrectionGain = 0.08;
-  static const double _confidenceThreshold = 0.6;
-  static const Duration _sampleInterval = Duration(milliseconds: 20);
-  static const double _minSpeedKmh =
-      5; // Lowered from 10 to catch more potholes
-  static const double _validMinSpeedKmh = 3; // Lowered from 5
-  static const double _validMaxSpeedKmh = 40; // Raised from 35
-  static const Duration _cooldown = Duration(milliseconds: 500);
+  static const double _confidenceThreshold = 0.45;  // Was 0.6 - easier to reach
+  static const Duration _sampleInterval = Duration(milliseconds: 10);  // Was 20ms - faster sampling
+  static const double _validMinSpeedKmh = 2;  // Was 3 - even slower detection
+  static const double _validMaxSpeedKmh = 50;  // Was 40 - allow faster rides
+  static const Duration _cooldown = Duration(milliseconds: 400);  // Was 500 - faster re-detection
 
   StreamSubscription? _subscription;
   StreamSubscription? _gyroSubscription;
   Timer? _fallbackTimer;
+  Timer? _keepAliveTimer;  // NEW: Keep sensors active in background
   bool _usingAccelerometerFallback = false;
   bool _receivedEvent = false;
   DateTime? _lastSampleSent;
@@ -39,6 +39,7 @@ class SensorService {
   }) {
     _subscription?.cancel();
     _fallbackTimer?.cancel();
+    _keepAliveTimer?.cancel();
     _usingAccelerometerFallback = false;
     _receivedEvent = false;
     _lastSampleSent = null;
@@ -47,7 +48,9 @@ class SensorService {
     _startIsolate(onPotholeDetected);
 
     _gyroSubscription?.cancel();
-    _gyroSubscription = gyroscopeEvents.listen((GyroscopeEvent event) {
+    _gyroSubscription = gyroscopeEventStream(
+      samplingPeriod: const Duration(milliseconds: 10),  // Faster gyro sampling
+    ).listen((GyroscopeEvent event) {
       _sendToIsolate({
         'type': 'gyro',
         'x': event.x,
@@ -58,7 +61,9 @@ class SensorService {
     });
 
     // Try to use the "User" accelerometer first (ignores gravity)
-    _subscription = userAccelerometerEvents.listen(
+    _subscription = userAccelerometerEventStream(
+      samplingPeriod: const Duration(milliseconds: 10),  // Faster sampling
+    ).listen(
       (UserAccelerometerEvent event) {
         _receivedEvent = true;
         _handleForce(event.x, event.y, event.z, onPotholeDetected);
@@ -76,6 +81,14 @@ class SensorService {
         _switchToAccelerometer(onPotholeDetected);
       }
     });
+    
+    // Keep-alive timer to ensure sensors stay active in background
+    _keepAliveTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      // This prevents the system from throttling sensor updates
+      _sendToIsolate({'type': 'keepalive', 'timestamp': DateTime.now().millisecondsSinceEpoch});
+    });
+    
+    debugPrint('[SENSOR] Started listening with enhanced sensitivity');
   }
 
   void _switchToAccelerometer(Function() onPotholeDetected) {
@@ -84,9 +97,13 @@ class SensorService {
     _fallbackTimer?.cancel();
     _subscription?.cancel();
 
-    _subscription = accelerometerEvents.listen((AccelerometerEvent event) {
+    _subscription = accelerometerEventStream(
+      samplingPeriod: const Duration(milliseconds: 10),  // Faster sampling
+    ).listen((AccelerometerEvent event) {
       _handleForce(event.x, event.y, event.z, onPotholeDetected);
     });
+    
+    debugPrint('[SENSOR] Switched to basic accelerometer with fast sampling');
   }
 
   void updateSpeed(double speedMps) {
@@ -126,6 +143,7 @@ class SensorService {
 
   void stopListening() {
     _fallbackTimer?.cancel();
+    _keepAliveTimer?.cancel();
     _subscription?.cancel();
     _gyroSubscription?.cancel();
     _receivePort?.close();
@@ -133,6 +151,7 @@ class SensorService {
     _sendPort = null;
     _isolate?.kill(priority: Isolate.immediate);
     _isolate = null;
+    debugPrint('[SENSOR] Stopped listening');
   }
 
   void _startIsolate(Function() onPotholeDetected) async {
@@ -341,12 +360,12 @@ class SensorService {
 
       final speedKmh = latestSpeedMps * 3.6;
       if (!testMode) {
+        // Only skip if completely stationary or going impossibly fast
         if (speedKmh < _validMinSpeedKmh || speedKmh > _validMaxSpeedKmh) {
           return;
         }
-        if (speedKmh < _minSpeedKmh) {
-          return;
-        }
+        // Don't skip slow speeds - detect potholes even when moving slowly
+        // (Removed the _minSpeedKmh check to catch more potholes)
       }
 
       zWindow.add(zForceG);
@@ -369,29 +388,29 @@ class SensorService {
       }
 
       final adaptiveThreshold = _computeAdaptiveThreshold(zWindow);
+      // Use a lower effective threshold - take the minimum between adaptive and fixed
       final threshold = testMode
-          ? min(0.9, _zImpactThresholdG)
-          : (adaptiveThreshold > _zImpactThresholdG
-                ? adaptiveThreshold
-                : _zImpactThresholdG);
+          ? min(0.8, _zImpactThresholdG * 0.7)
+          : min(adaptiveThreshold, _zImpactThresholdG);
 
       final jerkThreshold = testMode
-          ? _jerkThresholdGPerSec * 0.4
-          : _jerkThresholdGPerSec;
-      final zScore = ((zForceG - threshold) / threshold).clamp(0.0, 1.0);
+          ? _jerkThresholdGPerSec * 0.3
+          : _jerkThresholdGPerSec * 0.7;  // Lower jerk threshold for better detection
+      final zScore = ((zForceG - threshold * 0.8) / threshold).clamp(0.0, 1.0);  // More sensitive
       final jerkScore = (jerkGPerSec / jerkThreshold).clamp(0.0, 1.0);
       final speedScore =
-          ((speedKmh - _minSpeedKmh) / (_validMaxSpeedKmh - _minSpeedKmh))
+          ((speedKmh - _validMinSpeedKmh) / (_validMaxSpeedKmh - _validMinSpeedKmh))
               .clamp(0.0, 1.0);
+      // Changed weights: more emphasis on Z-force, less on speed
       final confidence =
-          (zScore * 0.5) + (jerkScore * 0.3) + (speedScore * 0.2);
+          (zScore * 0.55) + (jerkScore * 0.35) + (speedScore * 0.10);
       final confidenceThreshold = testMode
-          ? _confidenceThreshold * 0.4
+          ? _confidenceThreshold * 0.3
           : _confidenceThreshold;
 
       if (kDebugMode) {
         debugPrint(
-          'Zg: ${zForceG.toStringAsFixed(2)} | raw: ${rawAbsZ.toStringAsFixed(2)} | ${speedKmh.toStringAsFixed(1)} km/h',
+          'Zg: ${zForceG.toStringAsFixed(2)} | raw: ${rawAbsZ.toStringAsFixed(2)} | ${speedKmh.toStringAsFixed(1)} km/h | conf: ${confidence.toStringAsFixed(2)}',
         );
       }
 
@@ -415,11 +434,19 @@ class SensorService {
         });
       }
 
-      if (zForceG >= threshold &&
-          jerkGPerSec >= jerkThreshold &&
-          confidence >= confidenceThreshold) {
+      // IMPROVED DETECTION: Detect if EITHER high confidence OR strong impact
+      // This catches more potholes by using multiple detection strategies
+      final strongImpact = zForceG >= threshold * 1.3;  // Very strong bump
+      final highJerk = jerkGPerSec >= jerkThreshold * 1.5;  // Sudden change
+      final goodConfidence = confidence >= confidenceThreshold;
+      final combinedCheck = zForceG >= threshold * 0.9 && jerkGPerSec >= jerkThreshold * 0.6;
+      
+      if (strongImpact || highJerk || goodConfidence || combinedCheck) {
         lastDetection = now;
         mainSendPort.send('detected');
+        if (kDebugMode) {
+          debugPrint('[SENSOR] POTHOLE DETECTED! Z=${zForceG.toStringAsFixed(2)}G, Jerk=${jerkGPerSec.toStringAsFixed(1)}, Conf=${confidence.toStringAsFixed(2)}');
+        }
       }
     });
   }
