@@ -42,7 +42,16 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
     _autoReports = widget.reports.where((r) => !r.isManual).toList();
     _manualReports = widget.reports.where((r) => r.isManual).toList();
     _distanceKm = _computeDistanceKm(widget.routePoints);
+    
+    // Fallback: if no route points, calculate from start/end coordinates
+    if (_distanceKm == 0 && widget.startPoint != widget.endPoint) {
+      final dist = const Distance();
+      _distanceKm = dist.as(LengthUnit.Kilometer, widget.startPoint, widget.endPoint);
+      debugPrint('[RideSummary] Used start/end fallback distance: $_distanceKm km');
+    }
+    
     _avgSpeedKmh = _computeAverageSpeed();
+    debugPrint('[RideSummary] Distance: $_distanceKm km, Avg Speed: $_avgSpeedKmh km/h, Duration: ${widget.rideDuration}');
     _fetchWeatherForRide();
   }
 

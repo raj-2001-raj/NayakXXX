@@ -1,0 +1,26 @@
+{
+  "files_processed": 5746,
+  "total_windows": 3174,
+  "pothole_samples": 500,
+  "normal_samples": 194,
+  "features": [
+    "z_mean",
+    "z_std",
+    "z_min",
+    "z_max",
+    "z_range",
+    "x_mean",
+    "x_std",
+    "x_range",
+    "y_mean",
+    "y_std",
+    "y_range",
+    "sample_count"
+  ],
+  "thresholds": {
+    "pothole_high": 14.0,
+    "pothole_low": 5.5,
+    "normal_min": 7.5,
+    "normal_max": 12.5
+  }
+}

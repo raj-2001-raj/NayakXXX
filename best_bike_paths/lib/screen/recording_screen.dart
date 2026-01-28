@@ -12,6 +12,7 @@ import '../services/weather_service.dart';
 import '../services/segment_coloring_service.dart';
 import '../services/local_cache_service.dart';
 import '../services/background_ride_service.dart';
+import '../services/ml_pothole_service.dart';
 import 'manual_report_dialog.dart';
 import 'ride_summary_screen.dart';
 import 'verification_dialog.dart';
@@ -141,6 +142,7 @@ class RecordingScreen extends StatefulWidget {
 class _RecordingScreenState extends State<RecordingScreen>
     with WidgetsBindingObserver {
   final SensorService _sensorService = SensorService();
+  final MLPotholeDetectionService _mlPotholeService = MLPotholeDetectionService();
   final NavigationService _navService = NavigationService();
   final WeatherService _weatherService = WeatherService();
   final LocalCacheService _cacheService = LocalCacheService.instance;
@@ -177,7 +179,6 @@ class _RecordingScreenState extends State<RecordingScreen>
   bool _showFountains = true;
   bool _loadingAmenities = false;
   Map<String, double> _debugStats = {};
-  bool _testMode = false;
   bool _pendingAutoEndDialog = false;
   bool _autoEndDismissed = false;
   bool _restoringRide = false;
@@ -298,6 +299,8 @@ class _RecordingScreenState extends State<RecordingScreen>
       _currentSpeedMps = pos.speed;
     });
     _sensorService.updateSpeed(_currentSpeedMps);
+    _mlPotholeService.updateSpeed(_currentSpeedMps);
+    _mlPotholeService.setLocation(loc.latitude, loc.longitude);
     if (_isRideActive) {
       _checkDestinationArrival(loc);
       // Update background notification with current stats
@@ -474,6 +477,8 @@ class _RecordingScreenState extends State<RecordingScreen>
       _currentSpeedMps = position.speed;
     });
     _sensorService.updateSpeed(_currentSpeedMps);
+    _mlPotholeService.updateSpeed(_currentSpeedMps);
+    _mlPotholeService.setLocation(_currentLocation.latitude, _currentLocation.longitude);
 
     _sensorService.startListening(
       () => _reportPothole(isManual: false),
@@ -482,7 +487,18 @@ class _RecordingScreenState extends State<RecordingScreen>
         setState(() => _debugStats = data);
       },
     );
-    _sensorService.setTestMode(_testMode);
+    
+    // Start ML-powered pothole detection (runs in parallel with existing detection)
+    _mlPotholeService.startListening(
+      onDetected: (lat, lon, severity) {
+        debugPrint('[ML] Pothole detected at ($lat, $lon) with severity: $severity');
+        _reportPothole(isManual: false, mlSeverity: severity);
+      },
+      onDebugCallback: (data) {
+        debugPrint('[ML_DEBUG] ${data.toString()}');
+      },
+    );
+    
     _startLocationStream();
 
     if (_destinationPoint != null) {
@@ -1602,7 +1618,6 @@ class _RecordingScreenState extends State<RecordingScreen>
         setState(() => _debugStats = data);
       },
     );
-    _sensorService.setTestMode(_testMode);
 
     _startLocationStream();
     
@@ -1613,24 +1628,28 @@ class _RecordingScreenState extends State<RecordingScreen>
 
   Future<void> _stopRide() async {
     _sensorService.stopListening();
+    _mlPotholeService.stopListening();
     _positionSub?.cancel();
 
-    // Save ride ID before clearing state
+    // Save all data before clearing state
     final rideId = _activeRideId;
     final ridePath = List<LatLng>.from(_ridePath); // Copy path before clearing
+    final startLocation = _startLocation ?? _currentLocation; // Copy start location
+    final endLocation = _currentLocation; // Copy end location
+    final rideStartTime = _rideStartTime; // Copy start time
+    
+    debugPrint('[RIDE] Stopping ride: ${ridePath.length} points, start: $startLocation, end: $endLocation');
 
     setState(() {
       _isRideActive = false;
       _activeRideId = null; // Clear to prevent duplicate operations
     });
     await _clearRideState();
-    setState(() => _testMode = false);
-    _sensorService.setTestMode(false);
 
     // Calculate ride duration - ensure it's positive
     Duration rideDuration;
-    if (_rideStartTime != null) {
-      rideDuration = DateTime.now().difference(_rideStartTime!);
+    if (rideStartTime != null) {
+      rideDuration = DateTime.now().difference(rideStartTime);
       // If negative (clock skew), use absolute value
       if (rideDuration.isNegative) {
         rideDuration = rideDuration.abs();
@@ -1696,8 +1715,8 @@ class _RecordingScreenState extends State<RecordingScreen>
           builder: (_) => RideSummaryScreen(
             routePoints: ridePath.isNotEmpty ? ridePath : _routePoints,
             reports: _sessionReports,
-            startPoint: _startLocation ?? _currentLocation,
-            endPoint: _currentLocation,
+            startPoint: startLocation,
+            endPoint: endLocation,
             rideDuration: rideDuration,
             rideId: rideId,
           ),
@@ -1728,7 +1747,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     }
   }
 
-  Future<void> _reportPothole({required bool isManual}) async {
+  Future<void> _reportPothole({required bool isManual, double? mlSeverity}) async {
     String category = 'Bump';
 
     if (isManual) {
@@ -1738,6 +1757,9 @@ class _RecordingScreenState extends State<RecordingScreen>
       );
       if (result == null) return;
       category = result;
+    } else if (mlSeverity != null && mlSeverity > 0.7) {
+      // ML detected severe pothole
+      category = 'Pothole (ML Detected)';
     }
 
     final Position position = await Geolocator.getCurrentPosition();
@@ -1759,10 +1781,13 @@ class _RecordingScreenState extends State<RecordingScreen>
       await _saveReportOffline(potholeLoc, category, isManual);
     } else {
       if (mounted) {
+        final severityText = mlSeverity != null 
+            ? ' (Severity: ${(mlSeverity * 100).toInt()}%)' 
+            : '';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('$category Recorded! Added to Summary.'),
-            backgroundColor: isManual ? Colors.orange : Colors.red,
+            content: Text('$category Recorded!$severityText Added to Summary.'),
+            backgroundColor: isManual ? Colors.orange : (mlSeverity != null && mlSeverity > 0.5 ? Colors.deepOrange : Colors.red),
             duration: const Duration(milliseconds: 500),
           ),
         );
@@ -1828,23 +1853,6 @@ class _RecordingScreenState extends State<RecordingScreen>
       } catch (e2) {
         debugPrint('[RIDE] Fallback user_stats update also failed: $e2');
       }
-    }
-  }
-
-  void _toggleTestMode() {
-    final next = !_testMode;
-    setState(() => _testMode = next);
-    _sensorService.setTestMode(next);
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            next
-                ? 'Test mode enabled (looser thresholds).'
-                : 'Test mode disabled.',
-          ),
-        ),
-      );
     }
   }
 
@@ -2215,6 +2223,7 @@ class _RecordingScreenState extends State<RecordingScreen>
   void dispose() {
     _debounce?.cancel();
     _sensorService.stopListening();
+    _mlPotholeService.stopListening();
     _positionSub?.cancel();
     _syncStatusSub?.cancel();
     _pendingCountSub?.cancel();
@@ -2699,16 +2708,6 @@ class _RecordingScreenState extends State<RecordingScreen>
                 left: 20,
                 child: Column(
                   children: [
-                    FloatingActionButton.extended(
-                      heroTag: 'test_mode_toggle',
-                      onPressed: _toggleTestMode,
-                      backgroundColor: _testMode
-                          ? Colors.purple
-                          : Colors.grey.shade700,
-                      label: Text(_testMode ? 'TEST ON' : 'TEST OFF'),
-                      icon: const Icon(Icons.science),
-                    ),
-                    const SizedBox(height: 12),
                     FloatingActionButton.extended(
                       heroTag: 'nearest_fountain',
                       onPressed: _routeToNearestFountain,
