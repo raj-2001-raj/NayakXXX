@@ -49,108 +49,84 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
 
     String? fullName = _firstNameFromMeta(user.userMetadata, user.email);
-    double? totalDistanceKm;
+    double totalDistanceKm = 0;
     int? totalRides;
     int? contributionCount;
 
-    // Fetch full name and distance from profile
+    // Fetch full name from profile
     try {
       final profile = await client
           .from('profiles')
-          .select('full_name,total_distance_km')
+          .select('full_name')
           .eq('id', user.id)
           .maybeSingle();
       if (profile != null) {
         fullName = profile['full_name']?.toString() ?? fullName;
-        totalDistanceKm = _toDouble(profile['total_distance_km']);
       }
     } catch (_) {}
 
-    // Fallback for distance from user_stats
-    if (totalDistanceKm == null) {
-      try {
-        final stats = await client
-            .from('user_stats')
-            .select('total_distance_km')
-            .eq('user_id', user.id)
-            .maybeSingle();
-        if (stats != null) {
-          totalDistanceKm ??= _toDouble(stats['total_distance_km']);
-        }
-      } catch (_) {}
-    }
+    // ALWAYS calculate total distance from rides - using distance_km or coordinates
+    try {
+      final allRides =
+          await client
+                  .from('rides')
+                  .select('id,distance_km,start_lat,start_lon,end_lat,end_lon')
+                  .eq('user_id', user.id)
+              as List<dynamic>;
 
-    // FALLBACK: Calculate from rides.distance_km
-    if (totalDistanceKm == null || totalDistanceKm == 0) {
-      try {
-        final ridesWithDistance = await client
-            .from('rides')
-            .select('distance_km')
-            .eq('user_id', user.id) as List<dynamic>;
-        
-        double sumDistance = 0;
-        for (final ride in ridesWithDistance) {
-          final dist = _toDouble(ride['distance_km']);
-          if (dist != null && dist > 0) {
-            sumDistance += dist;
-          }
-        }
-        if (sumDistance > 0) {
-          totalDistanceKm = sumDistance;
-          debugPrint('[PROFILE] Calculated distance from rides.distance_km: $sumDistance km');
-        }
-      } catch (e) {
-        debugPrint('[PROFILE] Failed to get rides.distance_km: $e');
-      }
-    }
-    
-    // FALLBACK: Calculate from start/end coordinates
-    if (totalDistanceKm == null || totalDistanceKm == 0) {
-      try {
-        // First try with end_lat/end_lon
-        final ridesWithCoords = await client
-            .from('rides')
-            .select('start_lat,start_lon,end_lat,end_lon')
-            .eq('user_id', user.id) as List<dynamic>;
-        
-        debugPrint('[PROFILE] Fetched ${ridesWithCoords.length} rides with coordinates');
-        
-        double sumDistance = 0;
-        for (final ride in ridesWithCoords) {
+      double sumDistance = 0;
+      int ridesWithStoredDistance = 0;
+      int ridesCalculatedFromCoords = 0;
+
+      debugPrint(
+        '[PROFILE] Found ${allRides.length} rides for user ${user.id}',
+      );
+
+      for (final ride in allRides) {
+        final storedDist = _toDouble(ride['distance_km']);
+
+        // Use stored distance_km if available and > 0
+        if (storedDist != null && storedDist > 0.01) {
+          sumDistance += storedDist;
+          ridesWithStoredDistance++;
+          debugPrint(
+            '[PROFILE] Ride ${ride['id']} - stored distance: ${storedDist.toStringAsFixed(2)} km',
+          );
+        } else {
+          // Fallback: calculate from start/end coordinates
           final startLat = _toDouble(ride['start_lat']);
           final startLon = _toDouble(ride['start_lon']);
           final endLat = _toDouble(ride['end_lat']);
           final endLon = _toDouble(ride['end_lon']);
-          
-          debugPrint('[PROFILE] Ride coords: start=($startLat, $startLon), end=($endLat, $endLon)');
-          
-          if (startLat != null && startLon != null && endLat != null && endLon != null) {
-            final dist = _calculateDistanceKm(startLat, startLon, endLat, endLon);
-            debugPrint('[PROFILE] Calculated dist for ride: $dist km');
-            if (dist > 0.01) {
-              sumDistance += dist;
+
+          if (startLat != null &&
+              startLon != null &&
+              endLat != null &&
+              endLon != null) {
+            final calcDist = _calculateDistanceKm(
+              startLat,
+              startLon,
+              endLat,
+              endLon,
+            );
+            if (calcDist > 0.01) {
+              sumDistance += calcDist;
+              ridesCalculatedFromCoords++;
+              debugPrint(
+                '[PROFILE] Ride ${ride['id']} - calculated from coords: ${calcDist.toStringAsFixed(2)} km',
+              );
             }
           }
         }
-        if (sumDistance > 0) {
-          totalDistanceKm = sumDistance;
-          debugPrint('[PROFILE] Total calculated distance from coordinates: $sumDistance km');
-        } else {
-          debugPrint('[PROFILE] No valid coordinates found for distance calculation');
-        }
-      } catch (e) {
-        debugPrint('[PROFILE] Failed to calculate from coordinates: $e');
-        // Try with just start coordinates if end columns don't exist
-        try {
-          final ridesBasic = await client
-              .from('rides')
-              .select('start_lat,start_lon')
-              .eq('user_id', user.id) as List<dynamic>;
-          debugPrint('[PROFILE] Rides with start coords only: ${ridesBasic.length}');
-        } catch (e2) {
-          debugPrint('[PROFILE] Even basic coordinate fetch failed: $e2');
-        }
       }
+
+      totalDistanceKm = sumDistance;
+      debugPrint(
+        '[PROFILE] TOTAL distance: ${sumDistance.toStringAsFixed(2)} km '
+        '($ridesWithStoredDistance with stored, $ridesCalculatedFromCoords calculated from coords)',
+      );
+    } catch (e) {
+      debugPrint('[PROFILE] Failed to calculate total distance: $e');
     }
 
     // Get actual ride count from rides table
@@ -181,7 +157,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       userId: user.id,
       email: user.email,
       fullName: fullName ?? 'Cyclist',
-      totalDistanceKm: totalDistanceKm ?? 0,
+      totalDistanceKm: totalDistanceKm,
       totalRides: totalRides,
       scoreLabel: '$contributionCount',
     );
@@ -372,11 +348,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   /// Calculate distance between two coordinates using Haversine formula
   double _calculateDistanceKm(
-      double lat1, double lon1, double lat2, double lon2) {
+    double lat1,
+    double lon1,
+    double lat2,
+    double lon2,
+  ) {
     const double earthRadius = 6371; // Earth's radius in kilometers
     final dLat = _toRadians(lat2 - lat1);
     final dLon = _toRadians(lon2 - lon1);
-    final a = sin(dLat / 2) * sin(dLat / 2) +
+    final a =
+        sin(dLat / 2) * sin(dLat / 2) +
         cos(_toRadians(lat1)) *
             cos(_toRadians(lat2)) *
             sin(dLon / 2) *

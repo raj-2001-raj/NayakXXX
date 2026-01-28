@@ -5,7 +5,7 @@
 [![Flutter](https://img.shields.io/badge/Flutter-3.x-02569B?logo=flutter)](https://flutter.dev)
 [![Dart](https://img.shields.io/badge/Dart-3.10+-0175C2?logo=dart)](https://dart.dev)
 [![Supabase](https://img.shields.io/badge/Supabase-Backend-3ECF8E?logo=supabase)](https://supabase.com)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 
 <p align="center">
   <img src="assets/icon/app_icon_foreground.png" alt="Best Bike Paths Logo" width="150"/>
@@ -407,19 +407,8 @@ This project supports loading official datasets into Supabase for smarter routin
 2. **Import datasets** (optional)
    ```bash
    python -m pip install -r tools/requirements.txt
-
-Set your Supabase credentials in a `.env` file:
-
-```
-SUPABASE_URL=your_supabase_url
-SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
-```
-
-Then run:
-
-```bash
-python tools/import_datasets.py
-```
+   python tools/import_datasets.py
+   ```
 
 ### Notes
 
@@ -490,33 +479,12 @@ python train_pothole_model.py
 
 ---
 
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-## 👥 Team NayakXXX
-
-| Name | Role |
-|------|------|
-| **Rahul Nayak** | Lead Developer / Project Owner |
-
----
-
-## 🙏 Acknowledgments
+##  Acknowledgments
 
 - [SimRa Project (TU Berlin)](https://www.digital-future.berlin/forschung/projekte/simra/) - Training dataset
 - [OpenStreetMap](https://www.openstreetmap.org/) - Map data & APIs
 - [Supabase](https://supabase.com/) - Backend infrastructure
 - [Flutter Team](https://flutter.dev/) - Amazing framework
-
----
-
-## 📞 Contact
-
-- **GitHub**: [@raj-2001-raj](https://github.com/raj-2001-raj)
-- **Repository**: [NayakXXX](https://github.com/raj-2001-raj/NayakXXX)
 
 ---
 
@@ -530,5 +498,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-**Version**: 3.0 (ML Edition)  
-**Last Updated**: January 28, 2026
+

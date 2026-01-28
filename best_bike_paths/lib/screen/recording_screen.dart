@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
@@ -142,13 +143,15 @@ class RecordingScreen extends StatefulWidget {
 class _RecordingScreenState extends State<RecordingScreen>
     with WidgetsBindingObserver {
   final SensorService _sensorService = SensorService();
-  final MLPotholeDetectionService _mlPotholeService = MLPotholeDetectionService();
+  final MLPotholeDetectionService _mlPotholeService =
+      MLPotholeDetectionService();
   final NavigationService _navService = NavigationService();
   final WeatherService _weatherService = WeatherService();
   final LocalCacheService _cacheService = LocalCacheService.instance;
   final BackgroundRideService _backgroundService = BackgroundRideService();
   final MapController _mapController = MapController();
   final TextEditingController _searchController = TextEditingController();
+  final GlobalKey _liveStatsKey = GlobalKey();
 
   Timer? _debounce;
   StreamSubscription<Position>? _positionSub;
@@ -158,6 +161,8 @@ class _RecordingScreenState extends State<RecordingScreen>
   LatLng? _startLocation;
   LatLng? _destinationPoint;
   double _currentSpeedMps = 0;
+  double _currentHeading = 0; // Device heading in degrees (0-360)
+  LatLng? _lastHeadingLocation;
 
   bool _isRideActive = false;
   bool _isOffline = false;
@@ -201,6 +206,9 @@ class _RecordingScreenState extends State<RecordingScreen>
   List<RoadSegment> _coloredSegments = [];
   bool _showColoredSegments = true;
   List<AnomalyData> _anomalyDataList = [];
+  Offset? _liveStatsPosition;
+  double _liveStatsScale = 1.0;
+  double _liveStatsScaleStart = 1.0;
 
   @override
   void initState() {
@@ -291,10 +299,52 @@ class _RecordingScreenState extends State<RecordingScreen>
 
   void _onPositionUpdate(Position pos) {
     final loc = LatLng(pos.latitude, pos.longitude);
+    final hasSensorHeading = pos.heading >= 0 && pos.heading <= 360;
+    double? movementHeading;
+    if (_lastHeadingLocation != null) {
+      final movementDistance = const Distance().as(
+        LengthUnit.Meter,
+        _lastHeadingLocation!,
+        loc,
+      );
+      if (movementDistance >= 1) {
+        movementHeading = const Distance().bearing(_lastHeadingLocation!, loc);
+        _lastHeadingLocation = loc;
+      }
+    } else {
+      _lastHeadingLocation = loc;
+    }
+
     setState(() {
       _currentLocation = loc;
+      // Prefer sensor heading; otherwise use movement-derived bearing when moving
+      if (hasSensorHeading) {
+        _currentHeading = pos.heading;
+      } else if (movementHeading != null && !movementHeading.isNaN) {
+        _currentHeading = movementHeading;
+      }
       if (_isRideActive) {
-        _ridePath.add(loc);
+        // Only add point if it's significantly different from the last one
+        // to avoid duplicate points at the same location
+        if (_ridePath.isEmpty) {
+          _ridePath.add(loc);
+          debugPrint('[RIDE] Added first point to path: $loc');
+        } else {
+          final lastPoint = _ridePath.last;
+          final distance = const Distance().as(
+            LengthUnit.Meter,
+            lastPoint,
+            loc,
+          );
+          // Add point if moved at least 3 meters (more sensitive than GPS filter)
+          if (distance >= 3) {
+            _ridePath.add(loc);
+            final totalDistance = _computeRideDistanceKm(_ridePath);
+            debugPrint(
+              '[RIDE] Path updated: ${_ridePath.length} points, distance: ${totalDistance.toStringAsFixed(3)} km, moved: ${distance.toStringAsFixed(1)}m',
+            );
+          }
+        }
       }
       _currentSpeedMps = pos.speed;
     });
@@ -307,15 +357,19 @@ class _RecordingScreenState extends State<RecordingScreen>
       _updateBackgroundNotification();
     }
   }
-  
+
   /// Update the background service notification with current ride stats
   void _updateBackgroundNotification() {
     if (!_backgroundService.isRunning || _rideStartTime == null) return;
-    
+
     final duration = DateTime.now().difference(_rideStartTime!);
     final distanceKm = _computeRideDistanceKm(_ridePath);
     final speedKmh = _currentSpeedMps * 3.6; // m/s to km/h
-    
+
+    debugPrint(
+      '[NOTIFICATION] Updating: ${_ridePath.length} points, distance: ${distanceKm.toStringAsFixed(3)} km, speed: ${speedKmh.toStringAsFixed(1)} km/h',
+    );
+
     _backgroundService.updateNotification(
       distanceKm: distanceKm,
       duration: duration,
@@ -478,7 +532,10 @@ class _RecordingScreenState extends State<RecordingScreen>
     });
     _sensorService.updateSpeed(_currentSpeedMps);
     _mlPotholeService.updateSpeed(_currentSpeedMps);
-    _mlPotholeService.setLocation(_currentLocation.latitude, _currentLocation.longitude);
+    _mlPotholeService.setLocation(
+      _currentLocation.latitude,
+      _currentLocation.longitude,
+    );
 
     _sensorService.startListening(
       () => _reportPothole(isManual: false),
@@ -487,18 +544,20 @@ class _RecordingScreenState extends State<RecordingScreen>
         setState(() => _debugStats = data);
       },
     );
-    
+
     // Start ML-powered pothole detection (runs in parallel with existing detection)
     _mlPotholeService.startListening(
       onDetected: (lat, lon, severity) {
-        debugPrint('[ML] Pothole detected at ($lat, $lon) with severity: $severity');
+        debugPrint(
+          '[ML] Pothole detected at ($lat, $lon) with severity: $severity',
+        );
         _reportPothole(isManual: false, mlSeverity: severity);
       },
       onDebugCallback: (data) {
         debugPrint('[ML_DEBUG] ${data.toString()}');
       },
     );
-    
+
     _startLocationStream();
 
     if (_destinationPoint != null) {
@@ -583,7 +642,7 @@ class _RecordingScreenState extends State<RecordingScreen>
           _syncStatus = status;
           _isOffline = status == SyncStatus.offline;
         });
-        
+
         // Show snackbar for sync events
         if (status == SyncStatus.success) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -609,14 +668,18 @@ class _RecordingScreenState extends State<RecordingScreen>
   }
 
   /// Save report to local cache when offline
-  Future<void> _saveReportOffline(LatLng location, String category, bool isManual) async {
+  Future<void> _saveReportOffline(
+    LatLng location,
+    String category,
+    bool isManual,
+  ) async {
     await _cacheService.savePendingReport(
       location: location,
       category: category,
       isManual: isManual,
       rideId: _activeRideId,
     );
-    
+
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -660,9 +723,7 @@ class _RecordingScreenState extends State<RecordingScreen>
             ),
             const SizedBox(width: 6),
             Text(
-              _isOffline 
-                  ? 'Offline' 
-                  : '$_pendingReportCount pending',
+              _isOffline ? 'Offline' : '$_pendingReportCount pending',
               style: const TextStyle(
                 color: Colors.white,
                 fontSize: 12,
@@ -756,8 +817,10 @@ class _RecordingScreenState extends State<RecordingScreen>
     if (defaultTargetPlatform == TargetPlatform.android) {
       return AndroidSettings(
         accuracy: LocationAccuracy.bestForNavigation,
-        distanceFilter: 5,
-        intervalDuration: const Duration(seconds: 2),
+        distanceFilter: 3, // Reduced from 5 to 3 meters for more updates
+        intervalDuration: const Duration(
+          seconds: 1,
+        ), // Reduced from 2 to 1 second
         foregroundNotificationConfig: const ForegroundNotificationConfig(
           notificationTitle: 'Ride in progress',
           notificationText: 'Tracking your route in the background.',
@@ -769,7 +832,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     if (defaultTargetPlatform == TargetPlatform.iOS) {
       return AppleSettings(
         accuracy: LocationAccuracy.bestForNavigation,
-        distanceFilter: 5,
+        distanceFilter: 3, // Reduced from 5 to 3 meters
         pauseLocationUpdatesAutomatically: false,
         allowBackgroundLocationUpdates: true,
         showBackgroundLocationIndicator: true,
@@ -777,7 +840,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     }
     return const LocationSettings(
       accuracy: LocationAccuracy.best,
-      distanceFilter: 5,
+      distanceFilter: 3, // Reduced from 5 to 3 meters
     );
   }
 
@@ -801,7 +864,10 @@ class _RecordingScreenState extends State<RecordingScreen>
     // First, get the address for the selected point (reverse geocoding)
     String locationName = 'Selected Location';
     try {
-      final response = await _navService.reverseGeocode(point.latitude, point.longitude);
+      final response = await _navService.reverseGeocode(
+        point.latitude,
+        point.longitude,
+      );
       if (response != null && response.isNotEmpty) {
         locationName = response.split(',')[0];
       }
@@ -811,7 +877,7 @@ class _RecordingScreenState extends State<RecordingScreen>
 
     // Show confirmation dialog
     if (!mounted) return;
-    
+
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -821,10 +887,7 @@ class _RecordingScreenState extends State<RecordingScreen>
           children: [
             Icon(Icons.location_on, color: Color(0xFF00FF00)),
             SizedBox(width: 8),
-            Text(
-              'Set Destination?',
-              style: TextStyle(color: Colors.white),
-            ),
+            Text('Set Destination?', style: TextStyle(color: Colors.white)),
           ],
         ),
         content: Column(
@@ -865,10 +928,7 @@ class _RecordingScreenState extends State<RecordingScreen>
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
-            child: const Text(
-              'Cancel',
-              style: TextStyle(color: Colors.grey),
-            ),
+            child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
           ),
           ElevatedButton(
             onPressed: () => Navigator.of(context).pop(true),
@@ -909,10 +969,7 @@ class _RecordingScreenState extends State<RecordingScreen>
       await _persistRideState();
     }
 
-    final options = await _navService.getBikeRoutes(
-      _currentLocation,
-      point,
-    );
+    final options = await _navService.getBikeRoutes(_currentLocation, point);
 
     final withIssues = await _attachIssueCounts(options);
     final bestIndex = _pickBestRouteIndex(withIssues);
@@ -1609,6 +1666,9 @@ class _RecordingScreenState extends State<RecordingScreen>
       _pendingAutoEndDialog = false;
       _autoEndDismissed = false;
     });
+    debugPrint(
+      '[RIDE] Ride started! Initial path: ${_ridePath.length} points at $startLoc',
+    );
     await _persistRideState();
 
     _sensorService.startListening(
@@ -1620,7 +1680,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     );
 
     _startLocationStream();
-    
+
     // Start background service to keep tracking when screen is off
     await _backgroundService.startBackgroundTracking();
     debugPrint('[RIDE] Background tracking started');
@@ -1631,14 +1691,63 @@ class _RecordingScreenState extends State<RecordingScreen>
     _mlPotholeService.stopListening();
     _positionSub?.cancel();
 
+    // Get final position to ensure we have current location
+    try {
+      final finalPosition = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 5),
+        ),
+      );
+      final finalLoc = LatLng(finalPosition.latitude, finalPosition.longitude);
+      // Add final position to path if not already there
+      if (_ridePath.isEmpty || _ridePath.last != finalLoc) {
+        _ridePath.add(finalLoc);
+      }
+      _currentLocation = finalLoc;
+    } catch (e) {
+      debugPrint('[RIDE] Failed to get final position: $e');
+    }
+
     // Save all data before clearing state
     final rideId = _activeRideId;
     final ridePath = List<LatLng>.from(_ridePath); // Copy path before clearing
-    final startLocation = _startLocation ?? _currentLocation; // Copy start location
-    final endLocation = _currentLocation; // Copy end location
+    final startLocation =
+        _startLocation ??
+        (ridePath.isNotEmpty ? ridePath.first : _currentLocation);
+    final endLocation = ridePath.isNotEmpty ? ridePath.last : _currentLocation;
     final rideStartTime = _rideStartTime; // Copy start time
-    
-    debugPrint('[RIDE] Stopping ride: ${ridePath.length} points, start: $startLocation, end: $endLocation');
+
+    debugPrint(
+      '[RIDE] Stopping ride: ${ridePath.length} points, start: $startLocation, end: $endLocation',
+    );
+
+    // Calculate distance from recorded path BEFORE clearing
+    double distanceKm = _computeRideDistanceKm(ridePath);
+    debugPrint(
+      '[RIDE] Distance from path (${ridePath.length} points): $distanceKm km',
+    );
+
+    // If path is empty or distance too short, calculate from start/end coordinates
+    if (distanceKm < 0.01) {
+      final dist = const Distance();
+      final coordDistance = dist.as(
+        LengthUnit.Kilometer,
+        startLocation,
+        endLocation,
+      );
+      debugPrint(
+        '[RIDE] Path distance too small ($distanceKm), calculating from coords: $coordDistance km',
+      );
+      if (coordDistance > 0.001) {
+        distanceKm = coordDistance;
+        debugPrint('[RIDE] Using coordinate-based distance: $distanceKm km');
+      }
+    }
+
+    debugPrint(
+      '[RIDE] Final calculated distance: ${distanceKm.toStringAsFixed(3)} km',
+    );
 
     setState(() {
       _isRideActive = false;
@@ -1650,22 +1759,37 @@ class _RecordingScreenState extends State<RecordingScreen>
     Duration rideDuration;
     if (rideStartTime != null) {
       rideDuration = DateTime.now().difference(rideStartTime);
+      debugPrint(
+        '[RIDE] Ride start time: $rideStartTime, Now: ${DateTime.now()}, Duration: ${rideDuration.inSeconds} sec',
+      );
       // If negative (clock skew), use absolute value
       if (rideDuration.isNegative) {
         rideDuration = rideDuration.abs();
+        debugPrint(
+          '[RIDE] Duration was negative, using absolute: ${rideDuration.inSeconds} sec',
+        );
       }
     } else {
       rideDuration = Duration.zero;
+      debugPrint('[RIDE] WARNING: rideStartTime was null, duration is 0');
     }
 
-    // Calculate distance from recorded path
-    final distanceKm = _computeRideDistanceKm(ridePath);
-    debugPrint('[RIDE] Calculated distance: ${distanceKm.toStringAsFixed(2)} km from ${ridePath.length} points');
+    // Calculate average speed here for passing to summary screen
+    double avgSpeedKmh = 0;
+    if (rideDuration.inSeconds > 10 && distanceKm > 0.001) {
+      avgSpeedKmh = distanceKm / (rideDuration.inSeconds / 3600.0);
+      debugPrint('[RIDE] Calculated avg speed: $avgSpeedKmh km/h');
+    }
+
+    // Use the already calculated distanceKm from above
+    debugPrint(
+      '[RIDE] Final distance for DB: ${distanceKm.toStringAsFixed(2)} km, Duration: ${rideDuration.inSeconds} sec, Avg speed: ${avgSpeedKmh.toStringAsFixed(1)} km/h',
+    );
 
     if (rideId != null) {
       try {
         final userId = Supabase.instance.client.auth.currentUser?.id;
-        
+
         // Update ride with end time and distance
         await Supabase.instance.client
             .from('rides')
@@ -1676,8 +1800,10 @@ class _RecordingScreenState extends State<RecordingScreen>
               'end_lon': _currentLocation.longitude,
             })
             .eq('id', rideId);
-        debugPrint('[RIDE] Stopped ride: $rideId with distance: $distanceKm km');
-        
+        debugPrint(
+          '[RIDE] Stopped ride: $rideId with distance: $distanceKm km',
+        );
+
         // Update user's total distance in profiles table
         if (userId != null && distanceKm > 0) {
           await _updateUserTotalDistance(userId, distanceKm);
@@ -1694,7 +1820,7 @@ class _RecordingScreenState extends State<RecordingScreen>
               })
               .eq('id', rideId);
           debugPrint('[RIDE] Updated ride without location columns');
-          
+
           final userId = Supabase.instance.client.auth.currentUser?.id;
           if (userId != null && distanceKm > 0) {
             await _updateUserTotalDistance(userId, distanceKm);
@@ -1719,6 +1845,7 @@ class _RecordingScreenState extends State<RecordingScreen>
             endPoint: endLocation,
             rideDuration: rideDuration,
             rideId: rideId,
+            preComputedDistanceKm: distanceKm,
           ),
         ),
       );
@@ -1747,7 +1874,10 @@ class _RecordingScreenState extends State<RecordingScreen>
     }
   }
 
-  Future<void> _reportPothole({required bool isManual, double? mlSeverity}) async {
+  Future<void> _reportPothole({
+    required bool isManual,
+    double? mlSeverity,
+  }) async {
     String category = 'Bump';
 
     if (isManual) {
@@ -1781,13 +1911,17 @@ class _RecordingScreenState extends State<RecordingScreen>
       await _saveReportOffline(potholeLoc, category, isManual);
     } else {
       if (mounted) {
-        final severityText = mlSeverity != null 
-            ? ' (Severity: ${(mlSeverity * 100).toInt()}%)' 
+        final severityText = mlSeverity != null
+            ? ' (Severity: ${(mlSeverity * 100).toInt()}%)'
             : '';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('$category Recorded!$severityText Added to Summary.'),
-            backgroundColor: isManual ? Colors.orange : (mlSeverity != null && mlSeverity > 0.5 ? Colors.deepOrange : Colors.red),
+            backgroundColor: isManual
+                ? Colors.orange
+                : (mlSeverity != null && mlSeverity > 0.5
+                      ? Colors.deepOrange
+                      : Colors.red),
             duration: const Duration(milliseconds: 500),
           ),
         );
@@ -1806,8 +1940,118 @@ class _RecordingScreenState extends State<RecordingScreen>
     return km;
   }
 
+  /// Live distance during ride (path if available, else straight-line start->current)
+  double _currentDistanceKm() {
+    final pathDistance = _computeRideDistanceKm(_ridePath);
+    if (pathDistance > 0.001) return pathDistance;
+    if (_startLocation != null && _currentLocation != const LatLng(0, 0)) {
+      final straightLine = const Distance().as(
+        LengthUnit.Kilometer,
+        _startLocation!,
+        _currentLocation,
+      );
+      return straightLine;
+    }
+    return 0;
+  }
+
+  Duration _currentRideDuration() {
+    if (_rideStartTime == null) return Duration.zero;
+    final dur = DateTime.now().difference(_rideStartTime!);
+    return dur.isNegative ? dur.abs() : dur;
+  }
+
+  String _formatLiveDuration(Duration duration) {
+    final totalSeconds = duration.inSeconds;
+    final minutes = (totalSeconds ~/ 60).toString().padLeft(2, '0');
+    final seconds = (totalSeconds % 60).toString().padLeft(2, '0');
+    final hours = totalSeconds ~/ 3600;
+    if (hours > 0) {
+      final mins = ((totalSeconds % 3600) ~/ 60).toString().padLeft(2, '0');
+      return '${hours.toString().padLeft(2, '0')}:$mins:$seconds';
+    }
+    return '$minutes:$seconds';
+  }
+
+  void _updateLiveStatsPosition(Offset delta) {
+    final mediaSize = MediaQuery.of(context).size;
+    final padding = MediaQuery.of(context).padding;
+    final cardSize = _liveStatsKey.currentContext?.size;
+
+    final scaledWidth = (cardSize?.width ?? 180) * _liveStatsScale;
+    final scaledHeight = (cardSize?.height ?? 70) * _liveStatsScale;
+
+    final minX = 10.0;
+    final minY = padding.top + 10.0;
+    final maxX = mediaSize.width - scaledWidth - 10.0;
+    final maxY = mediaSize.height - padding.bottom - scaledHeight - 10.0;
+
+    final current = _liveStatsPosition ?? Offset(20, padding.top + 120);
+
+    final next = Offset(
+      (current.dx + delta.dx).clamp(minX, maxX),
+      (current.dy + delta.dy).clamp(minY, maxY),
+    );
+
+    setState(() {
+      _liveStatsPosition = next;
+    });
+  }
+
+  Widget _buildLiveStatsCard() {
+    final distance = _currentDistanceKm();
+    final duration = _currentRideDuration();
+    final speedKmh = (_currentSpeedMps * 3.6).abs();
+
+    Widget stat(String value, String label) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            value,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          Text(label, style: const TextStyle(color: Colors.grey, fontSize: 11)),
+        ],
+      );
+    }
+
+    return Container(
+      key: _liveStatsKey,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.75),
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.25),
+            blurRadius: 6,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          stat('${distance.toStringAsFixed(2)} km', 'Distance'),
+          Container(width: 1, height: 24, color: Colors.white24),
+          stat(_formatLiveDuration(duration), 'Time'),
+          Container(width: 1, height: 24, color: Colors.white24),
+          stat('${speedKmh.toStringAsFixed(1)} km/h', 'Speed'),
+        ],
+      ),
+    );
+  }
+
   /// Update user's total distance in profiles table
-  Future<void> _updateUserTotalDistance(String userId, double addedDistanceKm) async {
+  Future<void> _updateUserTotalDistance(
+    String userId,
+    double addedDistanceKm,
+  ) async {
     try {
       // First, get current total distance
       final profile = await Supabase.instance.client
@@ -1816,21 +2060,22 @@ class _RecordingScreenState extends State<RecordingScreen>
           .eq('id', userId)
           .maybeSingle();
 
-      final currentDistance = (profile?['total_distance_km'] as num?)?.toDouble() ?? 0.0;
+      final currentDistance =
+          (profile?['total_distance_km'] as num?)?.toDouble() ?? 0.0;
       final newTotalDistance = currentDistance + addedDistanceKm;
 
       // Update the profile with new total
-      await Supabase.instance.client
-          .from('profiles')
-          .upsert({
-            'id': userId,
-            'total_distance_km': newTotalDistance,
-          });
+      await Supabase.instance.client.from('profiles').upsert({
+        'id': userId,
+        'total_distance_km': newTotalDistance,
+      });
 
-      debugPrint('[RIDE] Updated user total distance: $currentDistance + $addedDistanceKm = $newTotalDistance km');
+      debugPrint(
+        '[RIDE] Updated user total distance: $currentDistance + $addedDistanceKm = $newTotalDistance km',
+      );
     } catch (e) {
       debugPrint('[RIDE] Failed to update user total distance: $e');
-      
+
       // Try user_stats table as fallback
       try {
         final stats = await Supabase.instance.client
@@ -1839,17 +2084,18 @@ class _RecordingScreenState extends State<RecordingScreen>
             .eq('user_id', userId)
             .maybeSingle();
 
-        final currentDistance = (stats?['total_distance_km'] as num?)?.toDouble() ?? 0.0;
+        final currentDistance =
+            (stats?['total_distance_km'] as num?)?.toDouble() ?? 0.0;
         final newTotalDistance = currentDistance + addedDistanceKm;
 
-        await Supabase.instance.client
-            .from('user_stats')
-            .upsert({
-              'user_id': userId,
-              'total_distance_km': newTotalDistance,
-            });
+        await Supabase.instance.client.from('user_stats').upsert({
+          'user_id': userId,
+          'total_distance_km': newTotalDistance,
+        });
 
-        debugPrint('[RIDE] Updated user_stats total distance: $newTotalDistance km');
+        debugPrint(
+          '[RIDE] Updated user_stats total distance: $newTotalDistance km',
+        );
       } catch (e2) {
         debugPrint('[RIDE] Fallback user_stats update also failed: $e2');
       }
@@ -2234,6 +2480,10 @@ class _RecordingScreenState extends State<RecordingScreen>
 
   @override
   Widget build(BuildContext context) {
+    final mediaQuery = MediaQuery.of(context);
+    final baseLiveStatsTop = mediaQuery.padding.top + 120;
+    final liveStatsPos = _liveStatsPosition ?? Offset(20, baseLiveStatsTop);
+
     return PopScope(
       canPop: !_isRideActive,
       onPopInvokedWithResult: (didPop, result) async {
@@ -2310,14 +2560,18 @@ class _RecordingScreenState extends State<RecordingScreen>
                 MarkerLayer(
                   markers: [
                     // Current location marker (blue navigation arrow)
+                    // Rotates based on device heading like Google Maps
                     Marker(
                       point: _currentLocation,
                       width: 40,
                       height: 40,
-                      child: const Icon(
-                        Icons.navigation,
-                        color: Colors.blue,
-                        size: 40,
+                      child: Transform.rotate(
+                        angle: _currentHeading * (math.pi / 180),
+                        child: const Icon(
+                          Icons.navigation,
+                          color: Colors.blue,
+                          size: 40,
+                        ),
                       ),
                     ),
                     // START marker (green flag)
@@ -2552,6 +2806,38 @@ class _RecordingScreenState extends State<RecordingScreen>
 
             // Offline indicator
             _buildOfflineIndicator(),
+
+            // Live ride stats overlay
+            if (_isRideActive)
+              Positioned(
+                // Push below the fountain/report buttons to avoid overlap
+                top: liveStatsPos.dy,
+                left: liveStatsPos.dx,
+                child: GestureDetector(
+                  onScaleStart: (details) {
+                    _liveStatsScaleStart = _liveStatsScale;
+                  },
+                  onScaleUpdate: (details) {
+                    _updateLiveStatsPosition(details.focalPointDelta);
+                    final nextScale = (_liveStatsScaleStart * details.scale)
+                        .clamp(0.8, 1.6);
+                    setState(() {
+                      _liveStatsScale = nextScale;
+                    });
+                  },
+                  child: Transform.scale(
+                    alignment: Alignment.topLeft,
+                    scale: _liveStatsScale,
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        minWidth: 260,
+                        maxWidth: mediaQuery.size.width - 40,
+                      ),
+                      child: _buildLiveStatsCard(),
+                    ),
+                  ),
+                ),
+              ),
 
             if (!_isRideActive)
               Positioned(

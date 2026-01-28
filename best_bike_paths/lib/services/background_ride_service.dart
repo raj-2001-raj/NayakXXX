@@ -6,7 +6,8 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 /// Service to manage background ride tracking
 class BackgroundRideService {
-  static final BackgroundRideService _instance = BackgroundRideService._internal();
+  static final BackgroundRideService _instance =
+      BackgroundRideService._internal();
   factory BackgroundRideService() => _instance;
   BackgroundRideService._internal();
 
@@ -24,8 +25,9 @@ class BackgroundRideService {
         channelId: 'ride_tracking_channel',
         channelName: 'Ride Tracking',
         channelDescription: 'Shows when a ride is being tracked',
-        channelImportance: NotificationChannelImportance.MAX,  // Maximum priority
-        priority: NotificationPriority.MAX,  // Maximum priority
+        channelImportance:
+            NotificationChannelImportance.MAX, // Maximum priority
+        priority: NotificationPriority.MAX, // Maximum priority
         enableVibration: false,
         playSound: false,
       ),
@@ -34,7 +36,9 @@ class BackgroundRideService {
         playSound: false,
       ),
       foregroundTaskOptions: ForegroundTaskOptions(
-        eventAction: ForegroundTaskEventAction.repeat(1000), // Update every 1 second for sensors
+        eventAction: ForegroundTaskEventAction.repeat(
+          1000,
+        ), // Update every 1 second for sensors
         autoRunOnBoot: false,
         autoRunOnMyPackageReplaced: false,
         allowWakeLock: true,
@@ -53,7 +57,8 @@ class BackgroundRideService {
     }
 
     // Request permissions
-    final notificationPermission = await FlutterForegroundTask.checkNotificationPermission();
+    final notificationPermission =
+        await FlutterForegroundTask.checkNotificationPermission();
     if (notificationPermission != NotificationPermission.granted) {
       await FlutterForegroundTask.requestNotificationPermission();
     }

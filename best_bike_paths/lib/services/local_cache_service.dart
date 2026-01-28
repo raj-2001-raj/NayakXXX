@@ -8,13 +8,7 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 /// Sync status for UI display
-enum SyncStatus {
-  idle,
-  syncing,
-  success,
-  error,
-  offline,
-}
+enum SyncStatus { idle, syncing, success, error, offline }
 
 /// Result of a sync operation
 class SyncResult {
@@ -38,18 +32,18 @@ class SyncResult {
 class LocalCacheService {
   static LocalCacheService? _instance;
   static Database? _database;
-  
+
   // Connectivity monitoring
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   bool _isOnline = true;
   final _syncStatusController = StreamController<SyncStatus>.broadcast();
   final _pendingCountController = StreamController<int>.broadcast();
-  
+
   // Callbacks
   Function(SyncResult)? onSyncComplete;
-  
+
   LocalCacheService._();
-  
+
   /// Singleton instance
   static LocalCacheService get instance {
     _instance ??= LocalCacheService._();
@@ -58,46 +52,46 @@ class LocalCacheService {
 
   /// Stream of sync status updates
   Stream<SyncStatus> get syncStatusStream => _syncStatusController.stream;
-  
+
   /// Stream of pending report count
   Stream<int> get pendingCountStream => _pendingCountController.stream;
-  
+
   /// Current online status
   bool get isOnline => _isOnline;
 
   /// Initialize the service and start monitoring connectivity
   Future<void> initialize() async {
     await database; // Ensure DB is ready
-    
+
     // Check initial connectivity
     final result = await Connectivity().checkConnectivity();
     _isOnline = !result.contains(ConnectivityResult.none);
-    
+
     // Start listening to connectivity changes
     _connectivitySubscription = Connectivity().onConnectivityChanged.listen(
       _handleConnectivityChange,
     );
-    
+
     // Update pending count
     _updatePendingCount();
-    
+
     // If online, try to sync any pending data
     if (_isOnline) {
       syncPendingData();
     }
-    
+
     debugPrint('[CACHE] LocalCacheService initialized. Online: $_isOnline');
   }
-  
+
   void _handleConnectivityChange(List<ConnectivityResult> results) {
     final wasOffline = !_isOnline;
     _isOnline = !results.contains(ConnectivityResult.none);
-    
+
     debugPrint('[CACHE] Connectivity changed. Online: $_isOnline');
-    
+
     if (_isOnline) {
       _syncStatusController.add(SyncStatus.idle);
-      
+
       // Just came online - sync pending data
       if (wasOffline) {
         debugPrint('[CACHE] Back online - starting sync...');
@@ -141,7 +135,7 @@ class LocalCacheService {
               expires_at TEXT NOT NULL
             )
           ''');
-          
+
           await db.execute('''
             CREATE TABLE IF NOT EXISTS cached_places (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -151,7 +145,7 @@ class LocalCacheService {
               expires_at TEXT NOT NULL
             )
           ''');
-          
+
           await db.execute('''
             CREATE TABLE IF NOT EXISTS sync_log (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -212,7 +206,7 @@ class LocalCacheService {
         expires_at TEXT NOT NULL
       )
     ''');
-    
+
     // Create index for fast route lookup
     await db.execute('''
       CREATE INDEX idx_routes_coords ON cached_routes(start_lat, start_lon, end_lat, end_lon)
@@ -228,12 +222,12 @@ class LocalCacheService {
         expires_at TEXT NOT NULL
       )
     ''');
-    
+
     // Create index for fast place lookup
     await db.execute('''
       CREATE INDEX idx_places_query ON cached_places(query)
     ''');
-    
+
     // Sync log for debugging
     await db.execute('''
       CREATE TABLE sync_log (
@@ -266,15 +260,17 @@ class LocalCacheService {
       'created_at': DateTime.now().toIso8601String(),
       'retry_count': 0,
     });
-    
-    debugPrint('[CACHE] Saved pending report #$id: $category at ${location.latitude}, ${location.longitude}');
+
+    debugPrint(
+      '[CACHE] Saved pending report #$id: $category at ${location.latitude}, ${location.longitude}',
+    );
     _updatePendingCount();
-    
+
     // Try to sync immediately if online
     if (_isOnline) {
       syncPendingData();
     }
-    
+
     return id;
   }
 
@@ -287,7 +283,9 @@ class LocalCacheService {
   /// Get count of pending reports
   Future<int> getPendingReportCount() async {
     final db = await database;
-    final result = await db.rawQuery('SELECT COUNT(*) as count FROM pending_reports');
+    final result = await db.rawQuery(
+      'SELECT COUNT(*) as count FROM pending_reports',
+    );
     return Sqflite.firstIntValue(result) ?? 0;
   }
 
@@ -337,7 +335,9 @@ class LocalCacheService {
           // Skip reports that have failed too many times
           final retryCount = report['retry_count'] as int? ?? 0;
           if (retryCount >= 5) {
-            debugPrint('[CACHE] Skipping report ${report['id']} - too many retries');
+            debugPrint(
+              '[CACHE] Skipping report ${report['id']} - too many retries',
+            );
             continue;
           }
 
@@ -363,7 +363,6 @@ class LocalCacheService {
 
       // Also refresh anomaly cache while we're online
       await refreshAnomalyCache();
-
     } catch (e) {
       debugPrint('[CACHE] Sync error: $e');
       lastError = e.toString();
@@ -376,8 +375,10 @@ class LocalCacheService {
       errorMessage: lastError,
     );
 
-    _syncStatusController.add(result.hasErrors ? SyncStatus.error : SyncStatus.success);
-    
+    _syncStatusController.add(
+      result.hasErrors ? SyncStatus.error : SyncStatus.success,
+    );
+
     // Reset to idle after a delay
     Future.delayed(const Duration(seconds: 3), () {
       if (_isOnline) {
@@ -386,8 +387,10 @@ class LocalCacheService {
     });
 
     onSyncComplete?.call(result);
-    debugPrint('[CACHE] Sync complete: $syncedCount synced, $failedCount failed');
-    
+    debugPrint(
+      '[CACHE] Sync complete: $syncedCount synced, $failedCount failed',
+    );
+
     return result;
   }
 
@@ -395,7 +398,7 @@ class LocalCacheService {
   Future<bool> _syncReportToServer(Map<String, dynamic> report) async {
     final client = Supabase.instance.client;
     final user = client.auth.currentUser;
-    
+
     if (user == null) {
       debugPrint('[CACHE] Cannot sync - not authenticated');
       return false;
@@ -424,7 +427,12 @@ class LocalCacheService {
     }
   }
 
-  Future<void> _logSync(String action, int count, bool success, String? error) async {
+  Future<void> _logSync(
+    String action,
+    int count,
+    bool success,
+    String? error,
+  ) async {
     final db = await database;
     await db.insert('sync_log', {
       'action': action,
@@ -443,11 +451,17 @@ class LocalCacheService {
 
     try {
       final client = Supabase.instance.client;
-      final anomalies = await client
-          .from('anomalies')
-          .select('id,location,severity,category,verified,trust_level')
-          .gte('created_at', DateTime.now().subtract(const Duration(days: 90)).toIso8601String())
-          as List<dynamic>;
+      final anomalies =
+          await client
+                  .from('anomalies')
+                  .select('id,location,severity,category,verified,trust_level')
+                  .gte(
+                    'created_at',
+                    DateTime.now()
+                        .subtract(const Duration(days: 90))
+                        .toIso8601String(),
+                  )
+              as List<dynamic>;
 
       await cacheAnomalies(anomalies.cast<Map<String, dynamic>>());
       debugPrint('[CACHE] Cached ${anomalies.length} anomalies');
@@ -469,27 +483,25 @@ class LocalCacheService {
       // Parse location from PostGIS format
       double? lat, lon;
       final locStr = anomaly['location']?.toString() ?? '';
-      final match = RegExp(r'POINT\(([-\d.]+)\s+([-\d.]+)\)').firstMatch(locStr);
+      final match = RegExp(
+        r'POINT\(([-\d.]+)\s+([-\d.]+)\)',
+      ).firstMatch(locStr);
       if (match != null) {
         lon = double.tryParse(match.group(1)!);
         lat = double.tryParse(match.group(2)!);
       }
 
       if (lat != null && lon != null) {
-        batch.insert(
-          'cached_anomalies',
-          {
-            'id': anomaly['id']?.toString() ?? '',
-            'latitude': lat,
-            'longitude': lon,
-            'severity': (anomaly['severity'] as num?)?.toDouble() ?? 2.0,
-            'category': anomaly['category']?.toString() ?? 'Unknown',
-            'verified': anomaly['verified'] == true ? 1 : 0,
-            'trust_level': anomaly['trust_level']?.toString(),
-            'cached_at': now,
-          },
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
+        batch.insert('cached_anomalies', {
+          'id': anomaly['id']?.toString() ?? '',
+          'latitude': lat,
+          'longitude': lon,
+          'severity': (anomaly['severity'] as num?)?.toDouble() ?? 2.0,
+          'category': anomaly['category']?.toString() ?? 'Unknown',
+          'verified': anomaly['verified'] == true ? 1 : 0,
+          'trust_level': anomaly['trust_level']?.toString(),
+          'cached_at': now,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
     }
 
@@ -508,7 +520,7 @@ class LocalCacheService {
     double radiusKm,
   ) async {
     final db = await database;
-    
+
     // Simple bounding box query (not perfect circle, but fast)
     final latDelta = radiusKm / 111.0; // ~111km per degree latitude
     final lonDelta = radiusKm / (111.0 * cos(center.latitude * pi / 180));
@@ -538,36 +550,34 @@ class LocalCacheService {
   }) async {
     final db = await database;
     final now = DateTime.now();
-    
+
     // Encode route points as JSON
     final routeJson = jsonEncode(
       routePoints.map((p) => {'lat': p.latitude, 'lon': p.longitude}).toList(),
     );
 
-    await db.insert(
-      'cached_routes',
-      {
-        'start_lat': start.latitude,
-        'start_lon': start.longitude,
-        'end_lat': end.latitude,
-        'end_lon': end.longitude,
-        'route_json': routeJson,
-        'distance_meters': distanceMeters,
-        'duration_seconds': durationSeconds,
-        'cached_at': now.toIso8601String(),
-        'expires_at': now.add(validFor).toIso8601String(),
-      },
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    await db.insert('cached_routes', {
+      'start_lat': start.latitude,
+      'start_lon': start.longitude,
+      'end_lat': end.latitude,
+      'end_lon': end.longitude,
+      'route_json': routeJson,
+      'distance_meters': distanceMeters,
+      'duration_seconds': durationSeconds,
+      'cached_at': now.toIso8601String(),
+      'expires_at': now.add(validFor).toIso8601String(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
 
-    debugPrint('[CACHE] Cached route from (${start.latitude}, ${start.longitude}) to (${end.latitude}, ${end.longitude})');
+    debugPrint(
+      '[CACHE] Cached route from (${start.latitude}, ${start.longitude}) to (${end.latitude}, ${end.longitude})',
+    );
   }
 
   /// Get a cached route if available
   Future<CachedRoute?> getCachedRoute(LatLng start, LatLng end) async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
-    
+
     // Allow some tolerance for start/end coordinates (~100m)
     const tolerance = 0.001; // ~111 meters
 
@@ -581,10 +591,14 @@ class LocalCacheService {
         expires_at > ?
       ''',
       whereArgs: [
-        start.latitude - tolerance, start.latitude + tolerance,
-        start.longitude - tolerance, start.longitude + tolerance,
-        end.latitude - tolerance, end.latitude + tolerance,
-        end.longitude - tolerance, end.longitude + tolerance,
+        start.latitude - tolerance,
+        start.latitude + tolerance,
+        start.longitude - tolerance,
+        start.longitude + tolerance,
+        end.latitude - tolerance,
+        end.latitude + tolerance,
+        end.longitude - tolerance,
+        end.longitude + tolerance,
         now,
       ],
       orderBy: 'cached_at DESC',
@@ -619,26 +633,29 @@ class LocalCacheService {
   Future<int> cleanExpiredRoutes() async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
-    return db.delete('cached_routes', where: 'expires_at < ?', whereArgs: [now]);
+    return db.delete(
+      'cached_routes',
+      where: 'expires_at < ?',
+      whereArgs: [now],
+    );
   }
 
   // ========== PLACE SEARCH CACHE ==========
 
   /// Cache place search results
-  Future<void> cachePlaceSearch(String query, List<Map<String, dynamic>> results) async {
+  Future<void> cachePlaceSearch(
+    String query,
+    List<Map<String, dynamic>> results,
+  ) async {
     final db = await database;
     final now = DateTime.now();
-    
-    await db.insert(
-      'cached_places',
-      {
-        'query': query.toLowerCase(),
-        'results_json': jsonEncode(results),
-        'cached_at': now.toIso8601String(),
-        'expires_at': now.add(const Duration(days: 30)).toIso8601String(),
-      },
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+
+    await db.insert('cached_places', {
+      'query': query.toLowerCase(),
+      'results_json': jsonEncode(results),
+      'cached_at': now.toIso8601String(),
+      'expires_at': now.add(const Duration(days: 30)).toIso8601String(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   /// Get cached place search results
@@ -665,7 +682,7 @@ class LocalCacheService {
   Future<void> cleanup() async {
     final deleted = await cleanExpiredRoutes();
     debugPrint('[CACHE] Cleaned up $deleted expired routes');
-    
+
     // Also clean old sync logs (keep last 100)
     final db = await database;
     await db.rawDelete('''
@@ -710,7 +727,7 @@ extension _MathExtension on double {
     // Normalize to [0, 2π]
     while (x < 0) x += 2 * pi;
     while (x > 2 * pi) x -= 2 * pi;
-    
+
     // Taylor series approximation
     double result = 1.0;
     double term = 1.0;

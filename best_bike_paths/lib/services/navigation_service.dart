@@ -35,13 +35,15 @@ class NavigationService {
       );
 
       if (response.statusCode == 200) {
-        final results = List<Map<String, dynamic>>.from(json.decode(response.body));
-        
+        final results = List<Map<String, dynamic>>.from(
+          json.decode(response.body),
+        );
+
         // Cache the results
         if (results.isNotEmpty) {
           await _cacheService.cachePlaceSearch(query, results);
         }
-        
+
         return results;
       }
     } catch (e) {
@@ -165,14 +167,15 @@ class NavigationService {
   BikeRouteOption _createDirectRoute(LatLng start, LatLng end) {
     const distance = Distance();
     final meters = distance.as(LengthUnit.Meter, start, end);
-    
+
     // Create intermediate points for smoother display
     final points = <LatLng>[start];
     const numPoints = 10;
     for (int i = 1; i < numPoints; i++) {
       final fraction = i / numPoints;
       final lat = start.latitude + (end.latitude - start.latitude) * fraction;
-      final lon = start.longitude + (end.longitude - start.longitude) * fraction;
+      final lon =
+          start.longitude + (end.longitude - start.longitude) * fraction;
       points.add(LatLng(lat, lon));
     }
     points.add(end);
@@ -190,13 +193,24 @@ class NavigationService {
   }
 
   /// Pre-cache routes for common destinations
-  Future<void> preCacheRoutes(LatLng currentLocation, List<LatLng> destinations) async {
+  Future<void> preCacheRoutes(
+    LatLng currentLocation,
+    List<LatLng> destinations,
+  ) async {
     if (!_cacheService.isOnline) return;
 
     for (final dest in destinations) {
-      final existing = await _cacheService.getCachedRoute(currentLocation, dest);
+      final existing = await _cacheService.getCachedRoute(
+        currentLocation,
+        dest,
+      );
       if (existing == null) {
-        await getBikeRoutes(currentLocation, dest, maxRoutes: 1, cacheResult: true);
+        await getBikeRoutes(
+          currentLocation,
+          dest,
+          maxRoutes: 1,
+          cacheResult: true,
+        );
         // Small delay to avoid rate limiting
         await Future.delayed(const Duration(milliseconds: 500));
       }

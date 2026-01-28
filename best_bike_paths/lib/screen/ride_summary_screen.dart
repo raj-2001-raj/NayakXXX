@@ -12,6 +12,7 @@ class RideSummaryScreen extends StatefulWidget {
   final LatLng endPoint;
   final Duration rideDuration;
   final String? rideId;
+  final double? preComputedDistanceKm;
 
   const RideSummaryScreen({
     super.key,
@@ -21,6 +22,7 @@ class RideSummaryScreen extends StatefulWidget {
     required this.endPoint,
     required this.rideDuration,
     this.rideId,
+    this.preComputedDistanceKm,
   });
 
   @override
@@ -41,17 +43,49 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
     super.initState();
     _autoReports = widget.reports.where((r) => !r.isManual).toList();
     _manualReports = widget.reports.where((r) => r.isManual).toList();
-    _distanceKm = _computeDistanceKm(widget.routePoints);
-    
-    // Fallback: if no route points, calculate from start/end coordinates
-    if (_distanceKm == 0 && widget.startPoint != widget.endPoint) {
-      final dist = const Distance();
-      _distanceKm = dist.as(LengthUnit.Kilometer, widget.startPoint, widget.endPoint);
-      debugPrint('[RideSummary] Used start/end fallback distance: $_distanceKm km');
+
+    debugPrint(
+      '[RideSummary] Received: preComputedDistanceKm=${widget.preComputedDistanceKm}, routePoints=${widget.routePoints.length}, duration=${widget.rideDuration.inSeconds}s',
+    );
+    debugPrint(
+      '[RideSummary] Start: ${widget.startPoint}, End: ${widget.endPoint}',
+    );
+
+    // Use pre-computed distance if available, otherwise calculate
+    if (widget.preComputedDistanceKm != null &&
+        widget.preComputedDistanceKm! > 0.001) {
+      _distanceKm = widget.preComputedDistanceKm!;
+      debugPrint('[RideSummary] Using pre-computed distance: $_distanceKm km');
+    } else {
+      _distanceKm = _computeDistanceKm(widget.routePoints);
+      debugPrint(
+        '[RideSummary] Calculated distance from ${widget.routePoints.length} route points: $_distanceKm km',
+      );
     }
-    
+
+    // Fallback: ALWAYS calculate from start/end coordinates if distance is still tiny
+    if (_distanceKm < 0.001) {
+      final dist = const Distance();
+      final startEndDist = dist.as(
+        LengthUnit.Kilometer,
+        widget.startPoint,
+        widget.endPoint,
+      );
+      debugPrint(
+        '[RideSummary] Calculated straight-line distance from coords: $startEndDist km',
+      );
+      if (startEndDist > 0.001) {
+        _distanceKm = startEndDist;
+        debugPrint(
+          '[RideSummary] Used start/end fallback distance: $_distanceKm km',
+        );
+      }
+    }
+
     _avgSpeedKmh = _computeAverageSpeed();
-    debugPrint('[RideSummary] Distance: $_distanceKm km, Avg Speed: $_avgSpeedKmh km/h, Duration: ${widget.rideDuration}');
+    debugPrint(
+      '[RideSummary] Distance: $_distanceKm km, Avg Speed: $_avgSpeedKmh km/h, Duration: ${widget.rideDuration}',
+    );
     _fetchWeatherForRide();
   }
 
@@ -383,8 +417,31 @@ class _RideSummaryScreenState extends State<RideSummaryScreen> {
 
   double _computeAverageSpeed() {
     final seconds = widget.rideDuration.inSeconds.abs(); // Use absolute value
-    if (seconds == 0) return 0;
-    return _distanceKm / (seconds / 3600);
+    debugPrint(
+      '[RideSummary] Computing avg speed: distance=$_distanceKm km, duration=$seconds sec',
+    );
+
+    // Need at least 10 seconds and some distance to calculate meaningful speed
+    if (seconds < 10 || _distanceKm < 0.001) {
+      debugPrint(
+        '[RideSummary] Duration or distance too small for speed calculation',
+      );
+      return 0;
+    }
+
+    // Calculate speed: distance (km) / time (hours)
+    final hours = seconds / 3600.0;
+    final speed = _distanceKm / hours;
+
+    // Sanity check: bike speeds are typically 5-50 km/h
+    // If calculated speed is unrealistic, cap it
+    if (speed > 100) {
+      debugPrint('[RideSummary] Unrealistic speed $speed km/h, capping at 50');
+      return 50.0;
+    }
+
+    debugPrint('[RideSummary] Calculated avg speed: $speed km/h');
+    return speed;
   }
 
   String _formatDuration(Duration duration) {

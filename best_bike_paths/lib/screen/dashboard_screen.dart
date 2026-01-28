@@ -74,7 +74,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   bool _automatedMode = true; // Toggle state [RASD Table 4]
   late Future<DashboardStats> _statsFuture;
   List<UnfinishedRide> _unfinishedRides = [];
-  
+
   // Offline sync support
   final LocalCacheService _cacheService = LocalCacheService.instance;
   StreamSubscription<int>? _pendingCountSub;
@@ -88,7 +88,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     _checkUnfinishedRides();
     _initOfflineListener();
   }
-  
+
   void _initOfflineListener() {
     _pendingCountSub = _cacheService.pendingCountStream.listen((count) {
       if (mounted) {
@@ -439,7 +439,10 @@ class _DashboardScreenState extends State<DashboardScreen>
               padding: const EdgeInsets.only(right: 8),
               child: Center(
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.orange.shade700,
                     borderRadius: BorderRadius.circular(12),
@@ -447,11 +450,18 @@ class _DashboardScreenState extends State<DashboardScreen>
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Icon(Icons.cloud_upload, color: Colors.white, size: 14),
+                      const Icon(
+                        Icons.cloud_upload,
+                        color: Colors.white,
+                        size: 14,
+                      ),
                       const SizedBox(width: 4),
                       Text(
                         '$_pendingReportCount',
-                        style: const TextStyle(color: Colors.white, fontSize: 12),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                        ),
                       ),
                     ],
                   ),
@@ -741,89 +751,84 @@ class _DashboardScreenState extends State<DashboardScreen>
     }
 
     String? fullName = _firstNameFromMeta(user.userMetadata, user.email);
-    double? totalDistanceKm;
+    double totalDistanceKm = 0;
 
+    // Get user's full name from profile
     try {
       final profile = await client
           .from('profiles')
-          .select('full_name,total_distance_km')
+          .select('full_name')
           .eq('id', user.id)
           .maybeSingle();
       if (profile != null) {
         fullName = _firstNameFromMeta({
           'full_name': profile['full_name'],
         }, fullName);
-        totalDistanceKm = _toDouble(profile['total_distance_km']);
       }
     } catch (_) {}
 
-    if (totalDistanceKm == null) {
-      try {
-        final stats = await client
-            .from('user_stats')
-            .select('total_distance_km')
-            .eq('user_id', user.id)
-            .maybeSingle();
-        if (stats != null) {
-          totalDistanceKm ??= _toDouble(stats['total_distance_km']);
-        }
-      } catch (_) {}
-    }
+    // ALWAYS calculate total distance from rides - using distance_km or coordinates
+    try {
+      final allRides =
+          await client
+                  .from('rides')
+                  .select('id,distance_km,start_lat,start_lon,end_lat,end_lon')
+                  .eq('user_id', user.id)
+              as List<dynamic>;
 
-    // FALLBACK 1: Try to calculate from rides.distance_km column
-    if (totalDistanceKm == null || totalDistanceKm == 0) {
-      try {
-        final ridesWithDistance = await client
-            .from('rides')
-            .select('distance_km')
-            .eq('user_id', user.id) as List<dynamic>;
-        
-        double sumDistance = 0;
-        for (final ride in ridesWithDistance) {
-          final dist = _toDouble(ride['distance_km']);
-          if (dist != null && dist > 0) {
-            sumDistance += dist;
-          }
-        }
-        if (sumDistance > 0) {
-          totalDistanceKm = sumDistance;
-          debugPrint('Dashboard: Calculated total distance from rides.distance_km: $sumDistance km');
-        }
-      } catch (e) {
-        debugPrint('Dashboard: Failed to calculate distance from rides.distance_km: $e');
-      }
-    }
-    
-    // FALLBACK 2: Calculate straight-line distance from start/end coordinates
-    if (totalDistanceKm == null || totalDistanceKm == 0) {
-      try {
-        final ridesWithCoords = await client
-            .from('rides')
-            .select('start_lat,start_lon,end_lat,end_lon')
-            .eq('user_id', user.id) as List<dynamic>;
-        
-        double sumDistance = 0;
-        for (final ride in ridesWithCoords) {
+      double sumDistance = 0;
+      int ridesWithStoredDistance = 0;
+      int ridesCalculatedFromCoords = 0;
+
+      debugPrint(
+        'Dashboard: Found ${allRides.length} rides for user ${user.id}',
+      );
+
+      for (final ride in allRides) {
+        final storedDist = _toDouble(ride['distance_km']);
+
+        // Use stored distance_km if available and > 0
+        if (storedDist != null && storedDist > 0.01) {
+          sumDistance += storedDist;
+          ridesWithStoredDistance++;
+          debugPrint(
+            'Dashboard: Ride ${ride['id']} - stored distance: ${storedDist.toStringAsFixed(2)} km',
+          );
+        } else {
+          // Fallback: calculate from start/end coordinates
           final startLat = _toDouble(ride['start_lat']);
           final startLon = _toDouble(ride['start_lon']);
           final endLat = _toDouble(ride['end_lat']);
           final endLon = _toDouble(ride['end_lon']);
-          
-          if (startLat != null && startLon != null && endLat != null && endLon != null) {
-            // Calculate straight-line distance using Haversine formula
-            final dist = _calculateDistanceKm(startLat, startLon, endLat, endLon);
-            if (dist > 0.01) { // Minimum 10 meters
-              sumDistance += dist;
+
+          if (startLat != null &&
+              startLon != null &&
+              endLat != null &&
+              endLon != null) {
+            final calcDist = _calculateDistanceKm(
+              startLat,
+              startLon,
+              endLat,
+              endLon,
+            );
+            if (calcDist > 0.01) {
+              sumDistance += calcDist;
+              ridesCalculatedFromCoords++;
+              debugPrint(
+                'Dashboard: Ride ${ride['id']} - calculated from coords: ${calcDist.toStringAsFixed(2)} km',
+              );
             }
           }
         }
-        if (sumDistance > 0) {
-          totalDistanceKm = sumDistance;
-          debugPrint('Dashboard: Calculated total distance from coordinates: $sumDistance km (estimated)');
-        }
-      } catch (e) {
-        debugPrint('Dashboard: Failed to calculate distance from coordinates: $e');
       }
+
+      totalDistanceKm = sumDistance;
+      debugPrint(
+        'Dashboard: TOTAL distance: ${sumDistance.toStringAsFixed(2)} km '
+        '($ridesWithStoredDistance with stored, $ridesCalculatedFromCoords calculated from coords)',
+      );
+    } catch (e) {
+      debugPrint('Dashboard: Failed to calculate total distance: $e');
     }
 
     // Always fetch live ride count from rides table
@@ -853,7 +858,7 @@ class _DashboardScreenState extends State<DashboardScreen>
 
     return DashboardStats(
       displayName: fullName ?? "Cyclist",
-      totalDistanceKm: totalDistanceKm ?? 0,
+      totalDistanceKm: totalDistanceKm,
       totalRides: totalRides,
       contributionCount: anomalyCount,
     );
@@ -873,20 +878,27 @@ class _DashboardScreenState extends State<DashboardScreen>
     if (value is num) return value.toDouble();
     return double.tryParse(value.toString());
   }
-  
+
   /// Calculate distance between two coordinates using Haversine formula
-  double _calculateDistanceKm(double lat1, double lon1, double lat2, double lon2) {
+  double _calculateDistanceKm(
+    double lat1,
+    double lon1,
+    double lat2,
+    double lon2,
+  ) {
     const double earthRadius = 6371; // km
     final dLat = _toRadians(lat2 - lat1);
     final dLon = _toRadians(lon2 - lon1);
-    final a = 
+    final a =
         sin(dLat / 2) * sin(dLat / 2) +
-        cos(_toRadians(lat1)) * cos(_toRadians(lat2)) *
-        sin(dLon / 2) * sin(dLon / 2);
+        cos(_toRadians(lat1)) *
+            cos(_toRadians(lat2)) *
+            sin(dLon / 2) *
+            sin(dLon / 2);
     final c = 2 * atan2(sqrt(a), sqrt(1 - a));
     return earthRadius * c;
   }
-  
+
   double _toRadians(double degrees) => degrees * pi / 180;
 }
 

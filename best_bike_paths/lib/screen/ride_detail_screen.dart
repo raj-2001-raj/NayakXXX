@@ -206,7 +206,7 @@ class RideHistoryEntry {
   final DateTime? endTime;
   final LatLng? startPoint;
   final LatLng? endPoint;
-  final double? storedDistanceKm;  // Distance stored in database
+  final double? storedDistanceKm; // Distance stored in database
   final bool? completed;
   final bool? reachedDestination;
 
@@ -227,13 +227,17 @@ class RideHistoryEntry {
     if (json['distance_km'] != null) {
       storedDist = double.tryParse(json['distance_km'].toString());
     }
-    
+
     final startPoint = _parseLatLng(json['start_lat'], json['start_lon']);
     final endPoint = _parseLatLng(json['end_lat'], json['end_lon']);
-    
-    debugPrint('[RIDE_DETAIL] Parsing ride: id=${json['id']}, start_lat=${json['start_lat']}, start_lon=${json['start_lon']}, end_lat=${json['end_lat']}, end_lon=${json['end_lon']}, distance_km=${json['distance_km']}');
-    debugPrint('[RIDE_DETAIL] Parsed points: start=$startPoint, end=$endPoint, storedDist=$storedDist');
-    
+
+    debugPrint(
+      '[RIDE_DETAIL] Parsing ride: id=${json['id']}, start_lat=${json['start_lat']}, start_lon=${json['start_lon']}, end_lat=${json['end_lat']}, end_lon=${json['end_lon']}, distance_km=${json['distance_km']}',
+    );
+    debugPrint(
+      '[RIDE_DETAIL] Parsed points: start=$startPoint, end=$endPoint, storedDist=$storedDist',
+    );
+
     return RideHistoryEntry(
       id: json['id']?.toString() ?? '-',
       startTime: _parseDate(json['start_time']),
@@ -267,23 +271,32 @@ class RideHistoryEntry {
 
   /// Returns stored distance if available, otherwise calculates from coordinates
   double? get distanceKm {
-    // Prefer stored distance from database (only if > 0)
-    if (storedDistanceKm != null && storedDistanceKm! > 0) {
+    // Prefer stored distance from database (only if > 0.001 km = 1 meter)
+    if (storedDistanceKm != null && storedDistanceKm! > 0.001) {
       debugPrint('[RIDE_DETAIL] Using stored distance: $storedDistanceKm km');
       return storedDistanceKm;
     }
     // Fallback: calculate straight-line distance from start to end
     if (startPoint == null || endPoint == null) {
-      debugPrint('[RIDE_DETAIL] Cannot calculate distance: start=$startPoint, end=$endPoint');
+      debugPrint(
+        '[RIDE_DETAIL] Cannot calculate distance: start=$startPoint, end=$endPoint',
+      );
       return null;
     }
-    final calculatedDist = const Distance().as(LengthUnit.Kilometer, startPoint!, endPoint!);
-    debugPrint('[RIDE_DETAIL] Calculated distance from coords: $calculatedDist km');
+    final calculatedDist = const Distance().as(
+      LengthUnit.Kilometer,
+      startPoint!,
+      endPoint!,
+    );
+    debugPrint(
+      '[RIDE_DETAIL] Calculated distance from coords: $calculatedDist km',
+    );
     return calculatedDist;
   }
-  
+
   /// Whether distance is actual tracked distance or just straight-line estimate
-  bool get isActualDistance => storedDistanceKm != null && storedDistanceKm! > 0;
+  bool get isActualDistance =>
+      storedDistanceKm != null && storedDistanceKm! > 0.001;
 
   double? get avgSpeedKmh {
     final duration = this.duration;

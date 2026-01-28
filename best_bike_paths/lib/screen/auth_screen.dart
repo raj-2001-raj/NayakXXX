@@ -26,13 +26,19 @@ class _AuthScreenState extends State<AuthScreen> {
 
   // --- LOGIC: DATE PICKER ---
   Future<void> _pickDate() async {
+    // Use a better initial date and allow easy year/month selection
+    final initialDate =
+        _selectedDate ??
+        DateTime.now().subtract(
+          const Duration(days: 365 * 20),
+        ); // Default to 20 years ago
+
     final DateTime? picked = await showDatePicker(
       context: context,
-      initialDate: DateTime.now().subtract(
-        const Duration(days: 365 * 18),
-      ), // Default to 18 years ago
-      firstDate: DateTime(1900),
+      initialDate: initialDate,
+      firstDate: DateTime(1920),
       lastDate: DateTime.now(),
+      initialDatePickerMode: DatePickerMode.year, // Start with year selection
       builder: (context, child) {
         return Theme(
           data: Theme.of(context).copyWith(
@@ -42,6 +48,17 @@ class _AuthScreenState extends State<AuthScreen> {
               surface: Color(0xFF1E1E1E),
               onSurface: Colors.white,
             ),
+            datePickerTheme: DatePickerThemeData(
+              backgroundColor: const Color(0xFF1E1E1E),
+              headerBackgroundColor: const Color(0xFF00FF00),
+              headerForegroundColor: Colors.black,
+              yearStyle: const TextStyle(fontSize: 16),
+              dayStyle: const TextStyle(fontSize: 14),
+              // Make year/month selection more prominent
+              yearOverlayColor: WidgetStateProperty.all(
+                const Color(0xFF00FF00).withOpacity(0.2),
+              ),
+            ),
           ),
           child: child!,
         );
@@ -50,7 +67,8 @@ class _AuthScreenState extends State<AuthScreen> {
     if (picked != null) {
       setState(() {
         _selectedDate = picked;
-        _dobController.text = "${picked.day}/${picked.month}/${picked.year}";
+        _dobController.text =
+            "${picked.day.toString().padLeft(2, '0')}/${picked.month.toString().padLeft(2, '0')}/${picked.year}";
       });
     }
   }
@@ -103,15 +121,16 @@ class _AuthScreenState extends State<AuthScreen> {
     } on AuthException catch (e) {
       if (mounted) {
         String errorMessage = e.message;
-        
+
         // Handle email rate limit error with user-friendly message
-        if (e.message.toLowerCase().contains('rate') || 
+        if (e.message.toLowerCase().contains('rate') ||
             e.message.toLowerCase().contains('limit') ||
             e.message.toLowerCase().contains('exceeded') ||
             e.statusCode == '429') {
-          errorMessage = "Too many sign-up attempts. Please try again in a few minutes, or continue as guest for now.";
+          errorMessage =
+              "Too many sign-up attempts. Please try again in a few minutes, or continue as guest for now.";
         }
-        
+
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(errorMessage),
@@ -123,13 +142,14 @@ class _AuthScreenState extends State<AuthScreen> {
     } catch (e) {
       if (mounted) {
         String errorMessage = e.toString();
-        
+
         // Handle rate limit errors from generic exceptions too
-        if (errorMessage.toLowerCase().contains('rate') || 
+        if (errorMessage.toLowerCase().contains('rate') ||
             errorMessage.toLowerCase().contains('limit')) {
-          errorMessage = "Too many sign-up attempts. Please try again in a few minutes, or continue as guest for now.";
+          errorMessage =
+              "Too many sign-up attempts. Please try again in a few minutes, or continue as guest for now.";
         }
-        
+
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(errorMessage),
@@ -153,7 +173,7 @@ class _AuthScreenState extends State<AuthScreen> {
   // --- LOGIC: PASSWORD RESET ---
   Future<void> _resetPassword() async {
     final email = _emailController.text.trim();
-    
+
     if (email.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -168,7 +188,7 @@ class _AuthScreenState extends State<AuthScreen> {
 
     try {
       await Supabase.instance.client.auth.resetPasswordForEmail(email);
-      
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -277,10 +297,7 @@ class _AuthScreenState extends State<AuthScreen> {
                     onPressed: _isLoading ? null : _resetPassword,
                     child: const Text(
                       "Forgot Password?",
-                      style: TextStyle(
-                        color: Color(0xFF00FF00),
-                        fontSize: 14,
-                      ),
+                      style: TextStyle(color: Color(0xFF00FF00), fontSize: 14),
                     ),
                   ),
                 ),
