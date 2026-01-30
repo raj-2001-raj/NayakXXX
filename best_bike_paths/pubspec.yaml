@@ -48,6 +48,10 @@ dependencies:
   flutter_local_notifications: ^19.5.0
   google_fonts: ^7.0.0
   http: ^1.6.0
+  shared_preferences: ^2.2.3
+  connectivity_plus: ^6.0.3
+  flutter_foreground_task: ^8.0.0
+  wakelock_plus: ^1.2.8
 
 dev_dependencies:
   flutter_test:
@@ -59,6 +63,9 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+  
+  # App icon generator - run: flutter pub run flutter_launcher_icons
+  flutter_launcher_icons: ^0.13.1
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -101,3 +108,18 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+
+# =====================================================
+# APP ICON CONFIGURATION
+# =====================================================
+# To change the app icon:
+# 1. Put your icon image (1024x1024 PNG) in the assets folder
+# 2. Update the path below
+# 3. Run: flutter pub run flutter_launcher_icons
+# =====================================================
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon/app_icon_foreground.png"
+  adaptive_icon_background: "#1a1a2e"  # Dark background for Android adaptive icons
+  adaptive_icon_foreground: "assets/icon/app_icon_foreground.png"

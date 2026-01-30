@@ -3,6 +3,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'core/constants.dart';
 import 'screen/auth_screen.dart';
 import 'screen/dashboard_screen.dart';
+import 'services/local_cache_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -12,11 +13,27 @@ Future<void> main() async {
     anonKey: SupabaseConstants.anonKey,
   );
 
+  // Initialize local cache service for offline support
+  await LocalCacheService.instance.initialize();
+
   runApp(const BBPApp());
 }
 
-class BBPApp extends StatelessWidget {
+class BBPApp extends StatefulWidget {
   const BBPApp({super.key});
+
+  @override
+  State<BBPApp> createState() => _BBPAppState();
+}
+
+class _BBPAppState extends State<BBPApp> {
+  late final Stream<AuthState> _authStateStream;
+
+  @override
+  void initState() {
+    super.initState();
+    _authStateStream = Supabase.instance.client.auth.onAuthStateChange;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -25,13 +42,20 @@ class BBPApp extends StatelessWidget {
       title: 'Best Bike Paths',
       theme: ThemeData(
         useMaterial3: true,
-        // Defined in DD Section 3.7
         primaryColor: const Color(0xFF00FF00),
         scaffoldBackgroundColor: const Color(0xFF121212),
       ),
-      home: Supabase.instance.client.auth.currentUser == null
-          ? const AuthScreen()
-          : const DashboardScreen(),
+      home: StreamBuilder<AuthState>(
+        stream: _authStateStream,
+        builder: (context, snapshot) {
+          // Check current auth state
+          final session = Supabase.instance.client.auth.currentSession;
+          if (session != null) {
+            return const DashboardScreen();
+          }
+          return const AuthScreen();
+        },
+      ),
     );
   }
 }
