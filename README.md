@@ -45,7 +45,7 @@
 👉 [**Download BBP v1.0**](./best_bike_paths/Bbpv1.0.apk)  
 👉 [**Alternative Download Link**](https://drive.google.com/drive/folders/1g6OPBHUt0JQDyJgvGWpbVctsvKueOfEy?usp=drive_link)
 
-> *Note: This is an Android APK. Enable "Install from unknown sources" in your device settings to install.*
+> *Note: This is an Android APK. Enable "Install from unknown sources" in your device settings to install. Maximum 2 registrations per hour(Supabase Limitation)*
 
 ---
 
