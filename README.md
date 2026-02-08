@@ -60,6 +60,7 @@ The `DeliveryFolder` contains all final submissions for grading:
 | **DDv1.pdf** | Design Document (Initial Submission) |
 | **DD_NayakXXXV1.1.pdf** | Updated Design Document |
 | **ITD_V1.pdf** | Integration Test Document |
+| **ATD.pdf** | For group 13 |
 
 ---
 
@@ -81,7 +82,7 @@ This repository is organized for clarity and ease of navigation:
 │   ├── RASDv1.pdf        # Requirement Analysis Document
 │   ├── DDv1.pdf          # Design Document
 │   ├── ITD_V1.pdf        # Integration Test Document
-│   └── ...
+│   └── ATD.pdf
 │
 ├── Implementation/       # Backend setup and related files
 │   ├── .vscode/          # VS Code workspace settings
