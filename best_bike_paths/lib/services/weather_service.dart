@@ -179,8 +179,8 @@ class WeatherService {
   // Using OpenWeatherMap free tier
   // Get your free API key at: https://openweathermap.org/api
   // For production, store this securely (e.g., in environment variables)
-  static const String _apiKey = '7e824ff295e20399b96e236bd1451c2f';
-  static const String _baseUrl = 'https://api.openweathermap.org/data/2.5';
+  static const String _apiKey = '';
+  static const String _baseUrl = '';
 
   WeatherData? _cachedWeather;
   DateTime? _lastFetch;

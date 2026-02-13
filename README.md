@@ -58,7 +58,8 @@ The `DeliveryFolder` contains all final submissions for grading:
 | **RASDv1.pdf** | Requirement Analysis Document (Initial Submission) |
 | **RASD_NAYAK_XXX_V1.1.pdf** | Updated Requirement Analysis Document |
 | **DDv1.pdf** | Design Document (Initial Submission) |
-| **DD_NayakXXXV1.1.pdf** | Updated Design Document |
+| **DD_NayakXXXV1.1.pdf** | Updated Design Document **Note: The images in this document were not complied properly due to fast compile mode of overleaf this was noticed on 13 feb**|
+| **DD_Nayak1.2.pdf** |Same as DDv1.1 only the image issues resolved|
 | **ITD_V1.pdf** | Integration Test Document |
 | **ATD.pdf** | For group 13 |
 
